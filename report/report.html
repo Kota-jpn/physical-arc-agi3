@@ -1,0 +1,80 @@
+<!doctype html><html lang="ja"><head><meta charset="utf-8">
+<title>説明資料 PAI最終課題</title>
+<style>
+@page { size: A4; margin: 14mm 14mm; }
+body { font-family: "Hiragino Sans","Noto Sans CJK JP",sans-serif; font-size: 10.2pt; line-height: 1.6; color:#1a1a1a; }
+h1 { font-size: 17pt; margin: 0 0 2mm; } h2 { font-size: 12.5pt; border-left: 4px solid #2b6cb0; padding-left: 6px; margin: 5mm 0 2mm; }
+.sub { color:#555; margin-bottom: 3mm; }
+table { border-collapse: collapse; width:100%; font-size: 9.2pt; } td,th { border:1px solid #bbb; padding: 2px 6px; vertical-align: top; } th { background:#eef3f9; }
+.shots { display:flex; gap:3mm; flex-wrap:wrap; } .shots figure { margin:0; width: 48.5%; } .shots img { width:100%; border:1px solid #ccc; } figcaption { font-size: 8.5pt; color:#444; }
+code { background:#f2f2f2; padding:0 3px; font-size: 9pt; }
+.pb { page-break-before: always; }
+</style></head><body>
+<h1>AI×ロボティクスによる創造的タスクの実現<br><span style="font-size:12pt;font-weight:normal">自然言語で指示するロボットアーム — 検証付きLLMプランナーと失敗からの閉ループ再計画</span></h1>
+<div class="sub">Physical AI講座 2026 応用編1 最終課題 / シミュレータ: Genesis (CPU, macOS) / ロボット: Franka Panda</div>
+
+<h2>1. 概要</h2>
+<p>「赤いキューブを青い皿の上に置いて、そのあと緑のキューブを赤の上に積んで」のような日本語・英語の指示を、LLMが
+<code>pick(object)</code> / <code>place_on(target)</code> のJSONプランに変換し、Genesis上のFranka Pandaアームが逆運動学(IK)と摩擦把持で実行する。
+各動作のあとシミュレータの物体姿勢から「何が何の上にあるか」を観測して成否を判定し、失敗や外乱があれば<b>観測状態と失敗理由をLLMに返して再計画</b>する。</p>
+
+<h2>2. 目的・動機</h2>
+<p>LLMによるタスク分解は、そのまま実行すると「存在しない物体を指す」「下に物がある箱を掴む」などの無効な計画や、実行中の失敗に弱い。
+本課題では (a) 計画をシンボリックに検証してからロボットに渡す、(b) 実行後の観測で失敗を検出し再計画する、という二つの安全網を付けた小さなエージェントを作り、
+AIを「推論のみ」で使いながら実機でも重要な信頼性の問題を扱うことを目的とした。実用面では、倉庫の仕分けや家庭での片付けのように、
+曖昧な言葉の指示と実行時の失敗の両方に対処する必要がある場面を想定している。</p>
+
+<h2>3. システム構成と工夫した点</h2>
+<svg viewBox="0 0 760 170" width="100%" xmlns="http://www.w3.org/2000/svg" font-family="Hiragino Sans, sans-serif" font-size="12">
+ <defs><marker id="a" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0,0 L8,4 L0,8 z" fill="#333"/></marker></defs>
+ <g stroke="#2b6cb0" fill="#eef3f9" stroke-width="1.5">
+  <rect x="5" y="55" width="105" height="50" rx="6"/><rect x="150" y="20" width="150" height="50" rx="6"/>
+  <rect x="150" y="100" width="150" height="50" rx="6"/><rect x="345" y="55" width="150" height="50" rx="6"/>
+  <rect x="540" y="55" width="215" height="50" rx="6"/></g>
+ <g text-anchor="middle" fill="#111">
+  <text x="57" y="77">自然言語の指示</text><text x="57" y="94" font-size="10">(日本語 / English)</text>
+  <text x="225" y="41">LLM (Azure OpenAI)</text><text x="225" y="58" font-size="10">指示+観測状態 → JSONプラン</text>
+  <text x="225" y="121">シンボリック検証</text><text x="225" y="138" font-size="10">物体ID・上が空か・把持状態</text>
+  <text x="420" y="77">実行 (Genesis)</text><text x="420" y="94" font-size="10">IK + PD制御 + 摩擦把持</text>
+  <text x="647" y="77">観測 (物体姿勢 → on関係)</text><text x="647" y="94" font-size="10">成否判定 / 外乱検知</text></g>
+ <g stroke="#333" stroke-width="1.5" fill="none" marker-end="url(#a)">
+  <path d="M110,80 L150,50"/><path d="M225,70 L225,100"/><path d="M300,125 L345,95"/><path d="M495,80 L540,80"/>
+  <path d="M647,105 L647,165 L225,165 L225,152" stroke="#c0392b" stroke-dasharray="5 3"/>
+  <path d="M225,165 L225,152" stroke="#c0392b"/></g>
+ <text x="440" y="160" fill="#c0392b" font-size="11">失敗・外乱: 観測状態 + 失敗理由 をLLMへ → 再計画</text>
+ <text x="235" y="88" font-size="10" fill="#c0392b">無効なら理由を返して再生成</text>
+</svg>
+<table>
+<tr><th style="width:22%">工夫</th><th>内容</th></tr>
+<tr><td>検証付きプランナー</td><td>JSONを物体IDと状態遷移で記号実行し、「箱の上に物がある物は掴めない」「すでに載っている物の上には置けない」などを検査。無効な場合は理由をLLMに返して最大3回再生成(<code>planner.py</code>)。</td></tr>
+<tr><td>閉ループ再計画</td><td>各動作の後と次動作の前に、シミュレータの姿勢から <code>on(obj, support)</code> を導出。達成済みの関係が崩れた(外乱)、掴み損ねた、置けていない場合に、観測状態・元のプラン・失敗理由をLLMに渡して残りの計画を作り直す。</td></tr>
+<tr><td>手内姿勢の補償</td><td>把持後にキューブとハンドの相対位置を測り、置く位置・高さを補正。3段積みでも崩れにくくなった。</td></tr>
+<tr><td>安定な積み方</td><td>Genesisのソルバのsubstepsを2にして接触を安定化し、グリッパをゆっくり開き垂直に退避して塔の崩壊を防止。</td></tr>
+<tr><td>オフライン再現性</td><td>APIキーが無くても、過去のLLM応答キャッシュ→小さなルールベース解析器で同じデモが動く(動画に使用したプランナー名は画面下に常時表示)。</td></tr>
+</table>
+
+<h2 class="pb">4. 結果</h2>
+<div class="shots">
+<figure><img src="img/shot_7.png"><figcaption>指示・観測状態・検証済みJSONプランの表示</figcaption></figure>
+<figure><img src="img/shot_22.png"><figcaption>外乱注入: 皿に置いた赤キューブを払い落とす(意図的な失敗)</figcaption></figure>
+<figure><img src="img/shot_24.png"><figcaption>失敗理由と観測状態をLLMへ渡して再計画(v2)</figcaption></figure>
+<figure><img src="img/shot_50.png"><figcaption>再計画後に赤を皿へ戻し、緑を積んで完了(シナリオ1)</figcaption></figure>
+<figure><img src="img/shot_76.png"><figcaption>英語指示による3段タワー(シナリオ2)</figcaption></figure>
+</div>
+<table style="margin-top:3mm">
+<tr><th>シナリオ</th><th>指示</th><th>結果</th></tr>
+<tr><td>1 (外乱あり)</td><td>赤いキューブを青い皿の上に置いて、そのあと緑のキューブを赤の上に積んで</td><td>1動作目後に赤キューブが落とされたことを検知し、再計画(v2)で復帰して目標達成</td></tr>
+<tr><td>2</td><td>Stack the blue cube on the green cube, then put the yellow cube on top of the blue one.</td><td>3段タワーを1回の計画で完成</td></tr>
+</table>
+<p>動画(約80秒)は2シナリオを連続で収録している。GenesisのCPUバックエンド(Apple M3)でデモ全体の計算は1分程度で、リアルタイム性の問題はない。</p>
+
+<h2>5. 考察・限界・今後</h2>
+<ul>
+<li>成否判定にはシミュレータの真の姿勢を使っており、視覚認識は含まない。実機化にはカメラによる物体検出(例: 色・形による分割やVLM)で <code>on</code> 関係を推定する層が必要。</li>
+<li>外乱は「キューブを手で払う」動きを姿勢書き換えで人為的に再現したもの。自然発生する把持失敗(摩擦把持が滑る)も同じ経路で検知・再計画されるが、今回のシナリオでは外乱注入で確実に再現した。</li>
+<li>プリミティブは <code>pick</code> と <code>place_on</code> のみで、押す・開けるなどは未対応。計画の自由度は物体の積み上げ順に限られる。</li>
+<li>JSONプランの検証をLLMに返すことで、無効な出力を実行前に除去できる点は実用上有効。一方、LLMが毎回同じ再計画を出す保証はないため、再計画回数に上限(3回)を置いた。</li>
+<li>動画に使用したプランナーは画面下部の "planner:" 表示のとおり。LLM(Azure OpenAI)使用時は同じコマンドで "LLM:gpt-5.1" 表示になる。</li>
+</ul>
+<p style="font-size:9pt;color:#555">再現: <code>./run.sh --demo</code>(詳細はREADME)。使用: Genesis 1.4.4, PyTorch 2.14, Python 3.11。</p>
+</body></html>

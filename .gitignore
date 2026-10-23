@@ -1,0 +1,8 @@
+.venv/
+.env
+__pycache__/
+*.pyc
+outputs/*
+!outputs/demo.mp4
+outputs/raw/
+report/*.html.tmp

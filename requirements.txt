@@ -1,0 +1,8 @@
+genesis-world==1.4.4
+torch==2.14.1
+openai==3.31.0
+python-dotenv==1.2.4
+imageio==2.38.1
+imageio-ffmpeg==0.6.0
+pillow==11.3.0
+numpy==2.4.6
