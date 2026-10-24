@@ -1,9 +1,15 @@
-"""Closed-loop LLM-driven pick & place in Genesis.
+"""Run Physical ARC-AGI-3 (unofficial, inspired by ARC-AGI-3) in Genesis and record the video.
 
-  python -m pai.run --demo                       # build outputs/demo.mp4 (3 scenarios + cards)
-  python -m pai.run -i "赤いキューブを青い皿の上に置いて" [--disturb] [--video out.mp4]
+  python -m pai.run --video outputs/demo.mp4     # agent: Gemini if GEMINI_API_KEY is set, else offline heuristic
+  python -m pai.run --offline --no-render        # fast logic check, no video
+
+The agent decides; the robot only executes. After every action the cube poses are read from the
+simulator, snapped to cells, and handed to the rules module (game.py), which returns the feedback
+(tile colours, lit tiles, lamp) that is then displayed on the board.
 """
 import argparse
+import json
+import re
 import sys
 from pathlib import Path
 
@@ -11,212 +17,152 @@ import imageio
 import numpy as np
 
 from . import overlay
+from .agents import AgentError, LOG, QuotaError, ReplayAgent, log, make_agent
+from .game import Game, LEVELS
+from .grid import CUBE, cell_center, stacks_from_poses
 from .overlay import Hud
-from .planner import Planner, PlanError, initial_on, pairs, validate, describe_state
-from .scene import Sim, OBJECTS, PLATE_H, CUBE
+from .scene import Sim
 
-SHORT = {"red_cube": "赤キューブ", "green_cube": "緑キューブ", "blue_cube": "青キューブ",
-         "yellow_cube": "黄キューブ", "blue_plate": "青い皿"}
 FPS = 25
-
-
-def observe(sim):
-    """Derive symbolic 'on' relations from simulator poses (ground truth of the closed loop)."""
-    P = sim.poses()
-    on, hand = {}, sim.hand_pos()
-    for c, (kind, _, _) in OBJECTS.items():
-        if kind != "cube":
-            continue
-        p, sup = P[c], "table"
-        if p[2] > 0.06 and np.linalg.norm(p - hand) < 0.16:
-            sup = "gripper"
-        else:
-            for o, q in P.items():
-                if o == c:
-                    continue
-                r = 0.075 if OBJECTS[o][0] == "plate" else 0.03
-                top = PLATE_H if OBJECTS[o][0] == "plate" else q[2] + CUBE / 2
-                if np.linalg.norm(p[:2] - q[:2]) < r and abs(p[2] - CUBE / 2 - top) < 0.012:
-                    sup = o
-        on[c] = sup
-    return on
+STEPS_PER_FRAME = 4              # 100 sim steps/s at 25 fps is 1x; --speed N renders one frame per 4N steps
+OUT = Path(__file__).resolve().parents[2] / "outputs"
 
 
 class Recorder:
     def __init__(self, path, hud):
         self.w = imageio.get_writer(path, fps=FPS, codec="libx264", quality=8, macro_block_size=1) if path else None
-        self.hud = hud
+        self.hud, self.n = hud, 0
 
     def frame(self, rgb):
         if self.w:
             self.w.append_data(overlay.compose(rgb, self.hud))
+            self.n += 1
 
     def raw(self, img, seconds):
         if self.w:
             for _ in range(int(seconds * FPS)):
                 self.w.append_data(img)
+                self.n += 1
+
+    def t(self):
+        """Seconds of video written so far."""
+        return self.n / FPS
 
     def close(self):
         if self.w:
             self.w.close()
 
 
-def step_labels(plan):
-    return [f"{SHORT[o]} → {SHORT[t]}" for o, t in pairs(plan)]
+def snapshot(sim):
+    """Observed layout from the physics: ({cell: [cubes bottom..top]}, held cube or None)."""
+    poses, hand, held = sim.poses(), sim.hand_pos(), None
+    for name, p in list(poses.items()):
+        if p[2] > 0.06 and np.linalg.norm(p - hand) < 0.16:
+            held = name
+            del poses[name]
+    return stacks_from_poses(poses), held
 
 
-def show_plan(rec, planner, title, instruction, on, plan, failure=None):
-    import json
-    lines = [f"INSTRUCTION : {instruction}"]
-    if failure:
-        lines.append(f"FAILURE     : {failure}")
-    lines += ["OBSERVED STATE (from simulator poses):"] + ["   " + l for l in describe_state(on).splitlines()]
-    lines += ["", f"planner = {planner.backend_used}   ->   validated plan JSON:"]
-    lines += ["   reason: " + plan.get("reason", "")]
-    lines += ["   " + json.dumps(st, ensure_ascii=False) for st in plan["steps"]]
-    rec.raw(overlay.text_card(title, lines, size=22), 6)
-
-
-def run_task(sim, rec, hud, planner, instruction, disturb=False, max_replans=3):
-    hud.instruction, hud.speed, hud.message_color = instruction, "", (255, 255, 255)
-    hud.steps, hud.plan_tag = [], ""
-    hud.message = "LLMにタスク分解を依頼中..."
-    sim.hold(30)
-    on = observe(sim)
-    plan = planner.plan(instruction, on)
-    hud.backend = planner.backend_used
-    show_plan(rec, planner, "LLM task planning", instruction, on, plan)
-    version, goals, done, replans, disturbed = 1, pairs(plan), [], 0, False
-    log = [f"plan v1: {pairs(plan)}"]
-    queue = list(pairs(plan))
-    hud.plan_tag = "PLAN v1 (JSON → primitives)"
-    hud.steps = [(l, "todo") for l in step_labels(plan)]
-    hud.message = f"LLMの計画を検証OK ({len(queue)} 動作)"
-    sim.hold(40)
-    prior = 0   # number of hud rows belonging to earlier plans (kept for history)
-    while queue:
-        obj, tgt = queue.pop(0)
-        idx = len(hud.steps) - len(queue) - 1
-        # --- closed-loop check: have earlier achievements been disturbed? --------
-        on = observe(sim)
-        broken = [(o, t) for o, t in done if on.get(o) != t]
-        failure = None
-        if broken:
-            failure = f"{broken[0][0]} is no longer on {broken[0][1]} (now on {on[broken[0][0]]})"
+def execute(sim, game, action):
+    """Carry out one action with the robot and return the observed (stacks, held)."""
+    if action["name"] == "pick":
+        sim.pick(action["object_id"])
+    else:
+        cell = tuple(action["cell"])
+        stack = game.stacks.get(cell)
+        if stack:                                    # stack on the real pose of the top cube
+            p = sim.pos(stack[-1])
+            xy, top = p[:2], p[2] + CUBE / 2
         else:
-            try:
-                validate({"steps": [{"action": "pick", "object": obj}, {"action": "place_on", "target": tgt}]}, on)
-            except PlanError as e:
-                failure = f"precondition violated: {e}"
-        if failure is None:
-            hud.steps[idx] = (hud.steps[idx][0], "doing")
-            hud.message = f"実行: {SHORT[obj]} をつかむ"
-            sim.pick(obj)
-            on = observe(sim)
-            if on[obj] != "gripper":
-                failure = f"grasp of {obj} failed (it is on {on[obj]})"
-            else:
-                hud.message = f"実行: {SHORT[obj]} を {SHORT[tgt]} の上へ"
-                top = PLATE_H if OBJECTS[tgt][0] == "plate" else sim.pos(tgt)[2] + CUBE / 2
-                sim.place_at(obj, sim.pos(tgt)[:2], top)
-                on = observe(sim)
-                if on[obj] != tgt:
-                    failure = f"{obj} is not on {tgt} after placing (it is on {on[obj]})"
-        if failure is None:
-            hud.steps[idx] = (hud.steps[idx][0], "done")
-            hud.message = f"検証OK: {SHORT[obj]} は {SHORT[tgt]} の上にある"
-            done.append((obj, tgt))
-            sim.hold(25)
-            if disturb and not disturbed and len(done) == 1 and queue:
-                disturbed = True
-                hud.message_color = (255, 170, 80)
-                hud.message = "外乱を注入: 置いたキューブを手で払い落とす(意図的な失敗の再現)"
-                p0, p1 = sim.pos(obj), np.array([OBJECTS[obj][2][0] + 0.1, 0.16, CUBE / 2])
-                for k in range(1, 31):
-                    sim.ent[obj].set_pos(p0 + (p1 - p0) * (k / 30) + [0, 0, 0.02 * np.sin(np.pi * k / 30)])
-                    sim.step()
-                sim.hold(40)
-                hud.message_color = (255, 255, 255)
-            continue
-        # --- failure: close the loop through the LLM ----------------------------
-        replans += 1
-        if replans > max_replans:
-            hud.message = "再計画の上限に到達"; sim.hold(30); return False, log
-        if hud.steps and idx < len(hud.steps) and hud.steps[idx][1] != "done":
-            hud.steps[idx] = (hud.steps[idx][0], "failed")
-        hud.message_color = (255, 110, 110)
-        hud.message = f"失敗検知: {failure}"
-        log.append(f"failure: {failure}")
-        sim.hold(50)
-        hud.message_color = (255, 255, 255)
-        hud.message = "観測した状態をLLMに渡して再計画..."
-        if on.get(obj) == "gripper":
-            sim.open_gripper(); sim.go_home()
-        on = observe(sim)
-        plan = planner.replan(instruction, {"steps": [{"action": "pick", "object": o} if k == 0 else {"action": "place_on", "target": t}
-                                                      for o, t in goals for k in (0, 1)]},
-                              on, None, failure)
-        version += 1
-        queue = list(pairs(plan))
-        hud.plan_tag = f"RE-PLAN v{version} (観測状態から再計画)"
-        hud.steps = [(l, "todo") for l in step_labels(plan)]
-        done = [(o, t) for o, t in done if on.get(o) == t]
-        log.append(f"replan v{version}: {pairs(plan)}")
-        show_plan(rec, planner, f"LLM re-planning (v{version})", instruction, on, plan, failure)
-        hud.message = f"再計画OK: {len(queue)} 動作"
-        sim.hold(50)
-    final = observe(sim)
-    ok = all(final.get(o) == t for o, t in goals)
-    hud.message_color = (120, 230, 140) if ok else (255, 110, 110)
-    hud.message = "タスク完了: 目標状態を確認" if ok else "目標未達"
-    sim.hold(75)
-    return ok, log
+            xy, top = cell_center(cell), 0.0
+        sim.place_at(game.held, xy, top)
+    sim.hold(20)
+    stacks, held = snapshot(sim)
+    if action["name"] == "pick" and held != action["object_id"]:     # grasp failed: reset the arm
+        sim.open_gripper()
+        sim.go_home()
+    return stacks, held
 
 
-DEMO = [
-    dict(instruction="赤いキューブを青い皿の上に置いて、そのあと緑のキューブを赤の上に積んで", disturb=True,
-         title="Scenario 1: 日本語指示 + 失敗からの再計画"),
-    dict(instruction="Stack the blue cube on the green cube, then put the yellow cube on top of the blue one.",
-         disturb=False, title="Scenario 2: English instruction (3-level tower)"),
-]
+def sync_hud(hud, game, last=""):
+    hud.actions, hud.lamp, hud.level = game.actions, game.solved, game.level.n
+    hud.grid, hud.lit, hud.last = game.top_grid(), [list(c) for c in game.fb.lit], last
 
 
 def main(argv=None):
     ap = argparse.ArgumentParser()
-    ap.add_argument("-i", "--instruction")
-    ap.add_argument("--disturb", action="store_true")
-    ap.add_argument("--video")
-    ap.add_argument("--demo", action="store_true")
+    ap.add_argument("--video", help="output mp4 (default: none)")
+    ap.add_argument("--agent", default="llm-hypo", choices=["llm-plain", "llm-tricks", "llm-hypo"],
+                    help="LLM condition when a key is set (default: llm-hypo)")
+    ap.add_argument("--offline", action="store_true", help="use the offline heuristic even if a key is set")
+    ap.add_argument("--replay", help="re-run the logged decisions of an earlier LLM run (agent_log.jsonl), no API calls")
     ap.add_argument("--no-render", action="store_true", help="skip rendering (fast logic test)")
+    ap.add_argument("--speed", type=int, default=4, help="playback speed factor burned into the video (default 4)")
+    ap.add_argument("--cap", type=int, default=40, help="max actions per level")
     a = ap.parse_args(argv)
-    out_dir = Path(__file__).resolve().parents[2] / "outputs"
-    out_dir.mkdir(exist_ok=True)
-    video = a.video or (str(out_dir / "demo.mp4") if a.demo else None)
-    hud = Hud()
-    rec = Recorder(None if a.no_render else video, hud)
-    sim = Sim(hook=None if a.no_render else rec.frame)
-    planner = Planner()
-    jobs = DEMO if a.demo else [dict(instruction=a.instruction, disturb=a.disturb, title="Custom task")]
-    if a.demo:
-        rec.raw(overlay.card([("LLM × Genesis", 54, (255, 255, 255)),
-                              ("自然言語で指示するロボットアーム:", 34, (150, 200, 255)),
-                              ("検証付きLLMプランナーと、失敗からの閉ループ再計画", 34, (150, 200, 255)),
-                              (f"Franka Panda / Genesis (CPU) / planner: {planner.backend}", 22, (180, 180, 180))]), 5)
-    results = []
-    for j in jobs:
-        hud.title = j["title"]
-        ok, log = run_task(sim, rec, hud, planner, j["instruction"], j["disturb"])
-        results.append(ok)
-        print(("OK  " if ok else "FAIL"), j["instruction"]); [print("   ", l) for l in log]
-        if j is not jobs[-1]:
-            sim.go_home(); sim.reset()
-    if a.demo:
-        rec.raw(overlay.card([("まとめ", 46, (255, 255, 255)),
-                              ("LLM: 指示 → JSONプラン → シンボリック検証", 28, (150, 200, 255)),
-                              ("Genesis: IK + 摩擦把持で実行 → 姿勢から成否を観測", 28, (150, 200, 255)),
-                              ("失敗時は観測状態をLLMへ返して再計画", 28, (150, 200, 255))]), 4)
+    OUT.mkdir(exist_ok=True)
+    if a.replay:
+        agent = ReplayAgent(a.replay)
+    else:
+        LOG.unlink(missing_ok=True)
+        agent = make_agent(a.agent, offline=a.offline)
+    hud = Hud(agent=agent.label, speed=f"{a.speed}x speed")
+    rec = Recorder(None if a.no_render else a.video, hud)
+    sim = Sim(render_every=STEPS_PER_FRAME * a.speed, hook=None if a.no_render else rec.frame)
+    game, results, tl = Game(1), [], {"title": 3.0, "level_complete": []}     # tl: video timestamps for screenshots
+    rec.raw(overlay.title_card(agent.label), 6)
+    for lv in LEVELS:
+        tl[f"l{lv.n}_start"] = rec.t()
+        game.start_level(lv.n)
+        agent.reset()
+        hud.hypothesis = "(ルールもゴールも知らされていない)"
+        sync_hud(hud, game)
+        sim.load_level(lv, game.fb)
+        sim.hold(60)
+        while not game.solved and game.actions < a.cap:
+            try:
+                d = agent.act(game.observation(), game.legal)
+            except AgentError as e:
+                print("agent failed:", e)
+                break
+            except QuotaError as e:
+                print("STOPPED:", e)
+                rec.close()
+                return 3
+            log({"agent": agent.label, "decision": d})
+            hud.hypothesis, hud.note = d["hypothesis"], d.get("note", "")
+            sim.hold(30)
+            stacks, held = execute(sim, game, d["action"])
+            effect = game.step(d["action"], observed=(stacks, held))
+            sim.show(game.fb)                          # lamp / tiles come from the rules module
+            sync_hud(hud, game, f"{game.history[-1].split(' -> ')[0]}  ->  {effect}"[:110])
+            sim.hold(60 if effect != "no visible change" else 20)
+            print(game.history[-1], "|", d["hypothesis"], "|", hud.note)
+            m = re.search(r"仮説 (\d+)→(\d+)", hud.note)
+            if lv.n == 2 and m and int(m[2]) < int(m[1]) and "l2_hypothesis_shrinks" not in tl:
+                tl["l2_hypothesis_shrinks"] = rec.t() - 1.0     # during the next action, note still on screen
+        ok = game.solved
+        results.append({"level": lv.n, "solved": ok, "actions": game.actions})
+        print(f"LEVEL {lv.n}: {'solved' if ok else 'NOT solved'} in {game.actions} actions")
+        if ok:
+            sim.hold(60)
+            tl["level_complete"].append(rec.t() + 1.0)
+            rec.raw(overlay.level_card(lv.n, len(LEVELS), game.actions, lv.optimal), 3)
+        else:
+            sim.hold(40)
+    base = json.loads((OUT / "baseline.json").read_text()).get("random", {}) if (OUT / "baseline.json").exists() else {}
+    rows = []
+    for r, lv in zip(results, LEVELS):
+        b = base.get("levels", {}).get(str(lv.n))
+        rnd = f"{b['solve_rate'] * 100:.1f}% solved (cap {base['cap']})" if b else "n/a"
+        rows.append((lv.n, r["actions"] if r["solved"] else None, rnd, lv.optimal))
+    tl["end"] = rec.t() + 3.0
+    tl["duration"] = rec.t() + 9.0
+    rec.raw(overlay.table_card(agent.label, rows), 9)
     rec.close()
-    return 0 if all(results) else 1
+    (OUT / "demo_run.json").write_text(json.dumps({"agent": agent.label, "cap": a.cap, "speed": a.speed, "levels": results}, indent=1))
+    (OUT / "demo_timeline.json").write_text(json.dumps(tl, indent=1))
+    return 0 if all(r["solved"] for r in results) else 1
 
 
 if __name__ == "__main__":

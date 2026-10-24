@@ -4,5 +4,8 @@ __pycache__/
 *.pyc
 outputs/*
 !outputs/demo.mp4
+!outputs/baseline.json
+!outputs/demo_run.json
+!outputs/agent_log_demo_hypo.jsonl
 outputs/raw/
 report/*.html.tmp

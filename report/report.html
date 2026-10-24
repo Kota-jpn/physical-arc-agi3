@@ -1,80 +1,92 @@
 <!doctype html><html lang="ja"><head><meta charset="utf-8">
 <title>説明資料 PAI最終課題</title>
 <style>
-@page { size: A4; margin: 14mm 14mm; }
-body { font-family: "Hiragino Sans","Noto Sans CJK JP",sans-serif; font-size: 10.2pt; line-height: 1.6; color:#1a1a1a; }
-h1 { font-size: 17pt; margin: 0 0 2mm; } h2 { font-size: 12.5pt; border-left: 4px solid #2b6cb0; padding-left: 6px; margin: 5mm 0 2mm; }
-.sub { color:#555; margin-bottom: 3mm; }
-table { border-collapse: collapse; width:100%; font-size: 9.2pt; } td,th { border:1px solid #bbb; padding: 2px 6px; vertical-align: top; } th { background:#eef3f9; }
-.shots { display:flex; gap:3mm; flex-wrap:wrap; } .shots figure { margin:0; width: 48.5%; } .shots img { width:100%; border:1px solid #ccc; } figcaption { font-size: 8.5pt; color:#444; }
-code { background:#f2f2f2; padding:0 3px; font-size: 9pt; }
-.pb { page-break-before: always; }
+@page { size: A4; margin: 13mm 14mm; }
+body { font-family: "Hiragino Sans","Noto Sans CJK JP",sans-serif; font-size: 9.6pt; line-height: 1.55; color:#1a1a1a; }
+h1 { font-size: 16.5pt; margin: 0 0 1mm; } h2 { font-size: 11.5pt; border-left: 5px solid #111; padding-left: 6px; margin: 4mm 0 1.5mm; break-after: avoid; }
+.sub { color:#555; margin-bottom: 2mm; font-size: 9pt; }
+.note { background:#111; color:#fff; padding:2mm 3mm; font-size:9pt; margin:2mm 0; }
+table { border-collapse: collapse; width:100%; font-size: 8.8pt; margin: 1.5mm 0; break-inside: avoid; } td,th { border:1px solid #999; padding: 2px 5px; vertical-align: top; } th { background:#eee; }
+.shots { display:flex; gap:2mm; } .shots figure { margin:0; width: 24.2%; }
+.ph { background:#fff3c4; } .shots img { width:100%; border:1px solid #333; display:block; } figcaption { font-size: 7.8pt; color:#444; line-height:1.35; }
+code { background:#f0f0f0; padding:0 3px; font-size: 8.6pt; }
+.small { font-size: 8pt; color:#555; }
+p { margin: 1mm 0; }
 </style></head><body>
-<h1>AI×ロボティクスによる創造的タスクの実現<br><span style="font-size:12pt;font-weight:normal">自然言語で指示するロボットアーム — 検証付きLLMプランナーと失敗からの閉ループ再計画</span></h1>
-<div class="sub">Physical AI講座 2026 応用編1 最終課題 / シミュレータ: Genesis (CPU, macOS) / ロボット: Franka Panda</div>
+<h1>Physical ARC-AGI-3 — ルールを教えられないロボットアーム</h1>
+<div class="sub">Physical AI講座 2026 応用編1 最終課題 / Kakinotane / Genesis 1.4.4 (CPU) + Franka Panda</div>
+<div class="note">非公式・ARC-AGI-3 に着想を得たもの / unofficial, inspired by ARC-AGI-3, not affiliated with ARC Prize Foundation. 本作品は ARC Prize Foundation の公式製品・公式ベンチマークではなく、公式のゲームやデータは使っていない。着想元: https://arcprize.org/arc-agi/3/</div>
 
 <h2>1. 概要</h2>
-<p>「赤いキューブを青い皿の上に置いて、そのあと緑のキューブを赤の上に積んで」のような日本語・英語の指示を、LLMが
-<code>pick(object)</code> / <code>place_on(target)</code> のJSONプランに変換し、Genesis上のFranka Pandaアームが逆運動学(IK)と摩擦把持で実行する。
-各動作のあとシミュレータの物体姿勢から「何が何の上にあるか」を観測して成否を判定し、失敗や外乱があれば<b>観測状態と失敗理由をLLMに返して再計画</b>する。</p>
+<p>ロボットアームに、ルールも目標も教えないまま卓上のパズルを解かせる環境と LLM エージェントを作った。6x6 の盤面に ARC 標準パレットの色タイルとキューブを置き、アームの行動は <code>pick(object)</code> と <code>place(cell)</code> の 2 種類だけである。毎ターン、エージェントは盤面の整数格子・ランプの状態・キューブの位置・行動履歴を受け取り、日本語の短い仮説と次の行動を返す。レベルは 3 つ(色合わせ、スイッチによる隠れた目標の出現、数え上げ)で、隠れたルールは見えるフィードバックだけから推測するしかない。学習(重みの更新)は行わず、推論だけで動かす。</p>
+<p>同じモデル(Gemini <code>gemini-3.1-flash-lite</code>、無料枠)で、LLM の使い方だけが違う 3 条件を比べた。プロンプトだけの <code>llm-plain</code>、ARC-AGI-3 の Kaggle コンペ Milestone 1 上位勢の安い工夫を足した <code>llm-tricks</code>、そして本課題の提案である <code>llm-hypo</code> である。<code>llm-hypo</code> は、LLM に仮説を Python の関数として書かせ、手元のコードで反証し、残った仮説を最もよく見分けられる実験を選んでから動く。ロボットの一手は高コストで取り消せないので、シミュレーションの中で考えてから動くという発想である。</p>
 
-<h2>2. 目的・動機</h2>
-<p>LLMによるタスク分解は、そのまま実行すると「存在しない物体を指す」「下に物がある箱を掴む」などの無効な計画や、実行中の失敗に弱い。
-本課題では (a) 計画をシンボリックに検証してからロボットに渡す、(b) 実行後の観測で失敗を検出し再計画する、という二つの安全網を付けた小さなエージェントを作り、
-AIを「推論のみ」で使いながら実機でも重要な信頼性の問題を扱うことを目的とした。実用面では、倉庫の仕分けや家庭での片付けのように、
-曖昧な言葉の指示と実行時の失敗の両方に対処する必要がある場面を想定している。</p>
+<h2>2. 動機</h2>
+<p>ARC-AGI-3 は 2026 年 3 月 25 日に公開された、ARC-AGI シリーズ初の完全に対話型のベンチマークである。環境はターン制で、説明もルールも目標も与えられず、エージェントは自分で探索して仕組みと勝ち方を見つけ、少ない行動数で進むことを求められる。環境は Core Knowledge の事前知識(物体性、基本的な幾何とトポロジー、基本的な物理、エージェント性)だけで解けるよう作られ、言語や文化的記号は使わない。技術報告によれば、人間は全環境を解ける一方、公開時点の最先端 AI の得点は 1% 未満だった(公開記事では 0.51%)。得点は人間の行動数を基準にしたレベルごとの行動効率(の 2 乗)で付き、場当たり的な総当たりは評価されない。</p>
+<p>この「学習済みの知識を引き出す」のではなく「その場で未知の環境に適応する」能力を、ロボットの文脈に持ち込む意味は大きいと考えた。現場のロボットは、初めて見る道具、取扱説明書のない機構、配置の違う環境に出会う。重みを更新せず、観測と少数の試行だけで規則を推測して行動を修正できれば、環境ごとの再学習なしに使える範囲が広がる。物理版にすると把持の失敗や積み上げの不安定さのような実世界の手間が混ざり、しかも一手ごとのコストが画面上のパズルより重い。</p>
+<p class="small">出典: https://arcprize.org/blog/arc-agi-3-launch (公開日、形式、人間 100% / AI 0.51%)、https://arcprize.org/media/ARC_AGI_3_Technical_Report.pdf (4 能力、Core Knowledge、行動効率と得点)。</p>
 
-<h2>3. システム構成と工夫した点</h2>
-<svg viewBox="0 0 760 170" width="100%" xmlns="http://www.w3.org/2000/svg" font-family="Hiragino Sans, sans-serif" font-size="12">
- <defs><marker id="a" markerWidth="8" markerHeight="8" refX="7" refY="4" orient="auto"><path d="M0,0 L8,4 L0,8 z" fill="#333"/></marker></defs>
- <g stroke="#2b6cb0" fill="#eef3f9" stroke-width="1.5">
-  <rect x="5" y="55" width="105" height="50" rx="6"/><rect x="150" y="20" width="150" height="50" rx="6"/>
-  <rect x="150" y="100" width="150" height="50" rx="6"/><rect x="345" y="55" width="150" height="50" rx="6"/>
-  <rect x="540" y="55" width="215" height="50" rx="6"/></g>
- <g text-anchor="middle" fill="#111">
-  <text x="57" y="77">自然言語の指示</text><text x="57" y="94" font-size="10">(日本語 / English)</text>
-  <text x="225" y="41">LLM (Azure OpenAI)</text><text x="225" y="58" font-size="10">指示+観測状態 → JSONプラン</text>
-  <text x="225" y="121">シンボリック検証</text><text x="225" y="138" font-size="10">物体ID・上が空か・把持状態</text>
-  <text x="420" y="77">実行 (Genesis)</text><text x="420" y="94" font-size="10">IK + PD制御 + 摩擦把持</text>
-  <text x="647" y="77">観測 (物体姿勢 → on関係)</text><text x="647" y="94" font-size="10">成否判定 / 外乱検知</text></g>
- <g stroke="#333" stroke-width="1.5" fill="none" marker-end="url(#a)">
-  <path d="M110,80 L150,50"/><path d="M225,70 L225,100"/><path d="M300,125 L345,95"/><path d="M495,80 L540,80"/>
-  <path d="M647,105 L647,165 L225,165 L225,152" stroke="#c0392b" stroke-dasharray="5 3"/>
-  <path d="M225,165 L225,152" stroke="#c0392b"/></g>
- <text x="440" y="160" fill="#c0392b" font-size="11">失敗・外乱: 観測状態 + 失敗理由 をLLMへ → 再計画</text>
- <text x="235" y="88" font-size="10" fill="#c0392b">無効なら理由を返して再生成</text>
-</svg>
+<h2>3. 環境とレベル設計</h2>
+<p>盤面は 6x6 の床タイルで、色は ARC の標準 10 色。動かせるのは単色のキューブ 4 個(赤・青・緑・黄)で、占有セルへの place は積み上げ(最大 4 段)になる。盤面の脇のランプは灰色で、レベルを解くと緑に点く。実行した行動はすべて数える。エージェントに伝えるのは、行動の種類、盤面が ARC 色の格子であること、「何か未知の条件でレベルが完了しランプが点く」こと、できるだけ少ない行動で解くこと、の 4 点だけで、ルールと目標は伝えない。</p>
 <table>
-<tr><th style="width:22%">工夫</th><th>内容</th></tr>
-<tr><td>検証付きプランナー</td><td>JSONを物体IDと状態遷移で記号実行し、「箱の上に物がある物は掴めない」「すでに載っている物の上には置けない」などを検査。無効な場合は理由をLLMに返して最大3回再生成(<code>planner.py</code>)。</td></tr>
-<tr><td>閉ループ再計画</td><td>各動作の後と次動作の前に、シミュレータの姿勢から <code>on(obj, support)</code> を導出。達成済みの関係が崩れた(外乱)、掴み損ねた、置けていない場合に、観測状態・元のプラン・失敗理由をLLMに渡して残りの計画を作り直す。</td></tr>
-<tr><td>手内姿勢の補償</td><td>把持後にキューブとハンドの相対位置を測り、置く位置・高さを補正。3段積みでも崩れにくくなった。</td></tr>
-<tr><td>安定な積み方</td><td>Genesisのソルバのsubstepsを2にして接触を安定化し、グリッパをゆっくり開き垂直に退避して塔の崩壊を防止。</td></tr>
-<tr><td>オフライン再現性</td><td>APIキーが無くても、過去のLLM応答キャッシュ→小さなルールベース解析器で同じデモが動く(動画に使用したプランナー名は画面下に常時表示)。</td></tr>
+<tr><th style="width:14%">レベル</th><th>隠れたルール(エージェントには非公開)</th><th style="width:26%">見える中間フィードバック</th><th style="width:7%">最短</th></tr>
+<tr><td>L1 色合わせ</td><td>同じ色のタイルにキューブを置くとそのタイルが点灯。3 枚すべて点灯でランプ。黄キューブは対応タイルのない囮。</td><td>点灯したタイルに白い枠が付く</td><td>6</td></tr>
+<tr><td>L2 因果スイッチ</td><td>目標タイルは灰色で隠れ、オレンジのスイッチにキューブが載っている間だけ色が現れる。現れた色に合わせる。スイッチ用に余りのキューブが 1 個必要。</td><td>灰色が色に変わる / スイッチに枠</td><td>6</td></tr>
+<tr><td>L3 数え上げ</td><td>マーカー(マゼンタ)が N=3 個並ぶ。水色タイルにちょうど N 個の塔を作るとランプが点く。</td><td>積むたびにマーカーが 1 個ずつ点灯</td><td>6</td></tr>
+</table>
+<p>各レベルは前のレベルの仮説がそのままでは通用しないように作った。L1 の「同じ色に置く」は L2 では隠れた目標を見つけてからでないと使えず、L3 では色ではなく個数がルールになる。</p>
+
+<h2>4. エージェントのループ</h2>
+<p>毎ターン、エージェントには、床の色の格子とキューブを重ねた上面の格子(どちらも整数)、点灯したセル、ランプの状態、キューブの一覧、このレベルの実験メモ(行動とその結果として見えた変化)、前レベルの教訓を文章として渡す。行動を実行するとロボットが動き、実行後のキューブの姿勢から状態を作り直し、ルールモジュールがフィードバックを返す。それが次のターンの観測になる。仮説は動画の画面下にも表示される。</p>
+<p><code>llm-plain</code> は競合する 2〜3 個の仮説と 1 手を JSON で返させるだけの条件である。<code>llm-tricks</code> はそこに、直前の差分の要約、効果のなかった置き方の記憶、既に訪れた盤面への警告、1〜4 手のまとめ出し、レベルをまたぐノートを足した。これらは Milestone 1 上位勢の報告にある安価な工夫を借りたものである。</p>
+<p><code>llm-hypo</code> では、LLM が「ランプが点く条件」を <code>lit(state)</code> という Python 関数の形で 2〜4 個書く。コードは、これまでに観測した全ての盤面とランプの状態に対して各関数を制限付きで実行し(import 不可、時間制限付き)、食い違うものを API 費用なしで捨てる。次の行動は、キューブを 1〜3 手動かして届く盤面のうち、生き残った仮説の予測が最も割れるものを選ぶ。全ての仮説が「ここでランプが点く」で一致したら、その計画を実行する。ここで使うシンボリックなモデルは、キューブがどこへ移るかという物理の遷移を予測するだけで、ルールモジュールの判定(ランプが点くか)は一切呼ばない。未訪問の盤面でランプが点くかどうかを知る手段は、LLM が書いた仮説だけである。</p>
+<p>キーが無い場合は、オフラインのヒューリスティックが代わりに動く。これは 3 種類の仮説族と探索順序を私が手で書き込んだもので、<b>LLM ではない</b>。動画では <code>agent: offline heuristic</code> と表示する。</p>
+
+<h2>5. ARC-AGI-3 の 4 能力との対応</h2>
+<table>
+<tr><th style="width:19%">能力 (技術報告)</th><th>本システムでの対応</th></tr>
+<tr><td>探索 (exploration)</td><td>ルール不明のまま、キューブをいろいろなタイルに置いてフィードバックを引き出す最初の数手。未試行のマーク付きセルも観測として渡す。</td></tr>
+<tr><td>モデル化 (modeling)</td><td>llm-hypo の <code>lit(state)</code> 仮説プログラム。観測との矛盾で自動的に捨てられ、生き残りが次の実験を決める。</td></tr>
+<tr><td>目標設定 (goal-setting)</td><td>何を達成すればランプが点くかを自分で決める部分。目標は与えず、枠の増減とランプの変化から推測させる。</td></tr>
+<tr><td>計画と実行 (planning)</td><td>仮説が一致した後の最短手順の探索(幅優先、最大 3 手)と、行動数の節約。予想外の結果が出たらまとめ出しを打ち切って立て直す。</td></tr>
 </table>
 
-<h2 class="pb">4. 結果</h2>
-<div class="shots">
-<figure><img src="img/shot_7.png"><figcaption>指示・観測状態・検証済みJSONプランの表示</figcaption></figure>
-<figure><img src="img/shot_22.png"><figcaption>外乱注入: 皿に置いた赤キューブを払い落とす(意図的な失敗)</figcaption></figure>
-<figure><img src="img/shot_24.png"><figcaption>失敗理由と観測状態をLLMへ渡して再計画(v2)</figcaption></figure>
-<figure><img src="img/shot_50.png"><figcaption>再計画後に赤を皿へ戻し、緑を積んで完了(シナリオ1)</figcaption></figure>
-<figure><img src="img/shot_76.png"><figcaption>英語指示による3段タワー(シナリオ2)</figcaption></figure>
+<h2>6. 結果</h2>
+<p>数値は物理なしの記号評価(<code>./eval.sh</code>)で、各セルは「到達率 / 到達したエピソードの平均行動数」。ランダムとヒューリスティックの行は 200 エピソード・上限 200 行動、LLM の行は上限 40 行動で、エピソード数が少ない(行ラベルに記載)。最短は 3 レベルとも 6 行動。LLM の行は <code>scripts/final_run.sh</code> による最終実行(2026-10-24、gemini-3.1-flash-lite)の結果で、括弧内は 1 レベルあたりの平均 LLM リクエスト数。</p>
+<table>
+<tr><th style="width:36%">エージェント</th><th>L1</th><th>L2</th><th>L3</th></tr>
+<tr><td>ランダム(200 エピソード、上限 200)</td><td>1% / 108</td><td>0.5% / 46</td><td>0.5% / 110</td></tr>
+<tr><td>オフライン・ヒューリスティック(手書き。LLM ではない)</td><td>100% / 6</td><td>100% / 8</td><td>100% / 6</td></tr>
+<tr><td>llm-plain(n=<!--N_PLAIN-->2)</td><td><!--PLAIN_L1-->50% / 6(25.5)</td><td><!--PLAIN_L2-->100% / 6(9.5)</td><td><!--PLAIN_L3-->50% / 20(43.5)</td></tr>
+<tr><td>llm-tricks(n=<!--N_TRICKS-->3)</td><td><!--TRICKS_L1-->67% / 6(5.0)</td><td><!--TRICKS_L2-->33% / 6(9.3)</td><td><!--TRICKS_L3-->0% / —(16.0)</td></tr>
+<tr><td>llm-hypo(提案。n=<!--N_HYPO-->3)</td><td><!--HYPO_L1-->100% / 6(1.7)</td><td><!--HYPO_L2-->67% / 29(18.7)</td><td><!--HYPO_L3-->0% / —(27.3)</td></tr>
+<tr><td>最短(理論値)</td><td>6</td><td>6</td><td>6</td></tr>
+</table>
+<p>ヒューリスティックは、規則の族を知っている人間が手で書いた参照値であり、LLM ではない。LLM がどこまで近づけるかの目安にはなるが、同列の比較対象ではない。ランダムは 200 行動の上限内にほとんど解けず、何も考えずに動くだけでは足りないことを示す下限になっている。</p>
+<p><!--RESULT_NOTE-->物理シミュレーション上の本番デモ(llm-hypo、上限 30)では、L1 と L2 を最短の 6 行動、L3 を 20 行動で解き、3 レベルすべてでランプを点灯させた(動画)。記号評価では、llm-hypo は L1 を 3 回とも最短で、しかも平均 1.7 リクエストという少なさで解いた。仮説を手元のコードで反証し、見分けられる実験だけを実行に回すため、LLM を呼ぶ回数そのものが減ることが効いている。一方で L2・L3 では条件間の差ははっきりせず、L3 は llm-plain が 2 回中 1 回解いたのに対し llm-hypo は 3 回とも上限内に解けなかった。前日の実行(修正前のコード)では L2 が llm-hypo 3/3、llm-tricks 0/2 と逆の傾向も出ており、エピソード数が 2〜3 と少ない現状では、どの条件が優れているとも結論できない。ばらつきの主な原因は、LLM が最初に立てた「色合わせ」の仮説から離れられないことで、仮説を正しく反証できても、正しい仮説を新しく思いつけなければ先に進めない。これは Tycho の報告(世界モデルが正確でもゴールの特定は別問題)とも一致しており、今後は仮説生成の多様化(温度・別モデル・反例の提示)とエピソード数の増加が課題である。</p>
+<div class="shots" style="margin-top:2mm">
+<figure><img src="img/f_title.png"><figcaption>タイトルカード: 非公式であることとエージェント名を表示</figcaption></figure>
+<figure><img src="img/f_l2.png"><figcaption>L2: 生き残った仮説の数がノートとして表示される場面</figcaption></figure>
+<figure><img src="img/f_complete.png"><figcaption>LEVEL COMPLETE: 行動数と最短の比較</figcaption></figure>
+<figure><img src="img/f_end.png"><figcaption>結果カード: 行動数とランダムの到達率、最短</figcaption></figure>
 </div>
-<table style="margin-top:3mm">
-<tr><th>シナリオ</th><th>指示</th><th>結果</th></tr>
-<tr><td>1 (外乱あり)</td><td>赤いキューブを青い皿の上に置いて、そのあと緑のキューブを赤の上に積んで</td><td>1動作目後に赤キューブが落とされたことを検知し、再計画(v2)で復帰して目標達成</td></tr>
-<tr><td>2</td><td>Stack the blue cube on the green cube, then put the yellow cube on top of the blue one.</td><td>3段タワーを1回の計画で完成</td></tr>
-</table>
-<p>動画(約80秒)は2シナリオを連続で収録している。GenesisのCPUバックエンド(Apple M3)でデモ全体の計算は1分程度で、リアルタイム性の問題はない。</p>
+<p class="small">スクリーンショットは動画(Genesis のレンダリングに HUD を重ねたもの)から切り出した。動画は <code>--speed</code> で倍速化している。</p>
 
-<h2>5. 考察・限界・今後</h2>
-<ul>
-<li>成否判定にはシミュレータの真の姿勢を使っており、視覚認識は含まない。実機化にはカメラによる物体検出(例: 色・形による分割やVLM)で <code>on</code> 関係を推定する層が必要。</li>
-<li>外乱は「キューブを手で払う」動きを姿勢書き換えで人為的に再現したもの。自然発生する把持失敗(摩擦把持が滑る)も同じ経路で検知・再計画されるが、今回のシナリオでは外乱注入で確実に再現した。</li>
-<li>プリミティブは <code>pick</code> と <code>place_on</code> のみで、押す・開けるなどは未対応。計画の自由度は物体の積み上げ順に限られる。</li>
-<li>JSONプランの検証をLLMに返すことで、無効な出力を実行前に除去できる点は実用上有効。一方、LLMが毎回同じ再計画を出す保証はないため、再計画回数に上限(3回)を置いた。</li>
-<li>動画に使用したプランナーは画面下部の "planner:" 表示のとおり。LLM(Azure OpenAI)使用時は同じコマンドで "LLM:gpt-5.1" 表示になる。</li>
-</ul>
-<p style="font-size:9pt;color:#555">再現: <code>./run.sh --demo</code>(詳細はREADME)。使用: Genesis 1.4.4, PyTorch 2.14, Python 3.11。</p>
+<h2>7. 工夫した点</h2>
+<p>物理とゲームロジックは分けた。ロボットは行動を実行するだけで、判定をしない。実行後にシミュレータからキューブの姿勢を読み、水平位置を最寄りのセルにスナップし、高さ順に並べて「どのセルに何段積まれているか」を作る。この状態だけを純 Python のルールモジュール(<code>game.py</code>)に渡すと、点灯するタイル、灰色タイルの色、ランプが返り、画面に表示される。観測はシミュレータの内部変数ではなく実際の姿勢から導出しているので、把持に失敗してキューブが動かなければ、ゲーム側にもそれが現れる。同じ <code>game.py</code> は物理なしの高速評価にもそのまま使える。</p>
+<p>LLM の出力は、JSON として読めるか、行動が今の盤面で合法か、llm-hypo では仮説コードが関数として動くか、既に観測と矛盾していないかを検証する。不正なら理由をそのまま返して最大 3 回まで再生成させ、それでもだめなら打ち切る。Gemini の無料枠では 429 や 5xx、タイムアウトが起きるので、10 秒から最大 90 秒まで倍々に待つ指数バックオフで最大 6 回再試行し、1 日の上限に達したときは終わった分だけ残して止まる。全リクエストとレスポンス、実行した判断、検証エラーは <code>outputs/agent_log.jsonl</code> に記録し、<code>--replay</code> でそのログから動画を作り直せる。仮説コードは許可した組み込み関数だけの制限付き環境で、時間制限をかけて実行する。</p>
+
+<h2>8. 限界と反省</h2>
+<p>失敗の分析から、LLM の癖がはっきり見えた。L3 では、点灯したマーカーを「目標の置き場所」と読み、L1 の色合わせの発想に戻ってしまう例が目立った。仮説をコードにすると別の失敗も出る。空のリストに対する <code>all()</code> は真になるため、何も言っていないのに常にランプが点くと予測する仮説(空虚な真)ができる。また、型の取り違えで発火しない仮説もあった(セルをリストと比べるなど)。これらには一般的な対処を入れた: セルやタイルの型を寛容にして list と tuple のどちらでも比べられるようにし、空虚な真への注意をプロンプトと反証メッセージに入れ、観測済みの状態の表と <code>heights()</code> を渡し、行動が出ないときの代替行動には回数の上限を付けた。特定のレベルの答えを教える対処は入れていない。</p>
+<p>限界も多い。状態は真の姿勢からセルを割り出しており、視覚認識を含まない。3 レベルはそれぞれ 1 つの規則で解けるため、ARC-AGI-3 の難しさや多様さには遠く及ばない。また ARC-AGI-3 は言語や数字、文化的な記号を避けているが、本作品は日本語の仮説を書かせ、L3 は個数を数える課題で、ランプの色にも意味がある。得点も ARC-AGI-3 の行動効率の指標ではなく、単純な行動数である。評価の回数は無料枠の制限のため少なく、LLM の応答も実行ごとに変わるので、条件間の優劣の結論は出せない。ヒューリスティックの数字は規則を知った上で書いたものである。</p>
+
+<h2>9. 関連研究と本課題の位置づけ</h2>
+<p>ARC-AGI-2(2025)では、テスト時に重みを更新するテスト時学習が上位を占め、優勝した NVARC は 24.03% だった(https://arcprize.org/blog/arc-prize-2025-results-analysis)。ARC-AGI-3 の Milestone 1 では、上位 3 チームがローカルで動くオープンな LLM を使ったハーネスで、1 位は Qwen 系のモデルが REPL で Python を実行する構成、2 位は Gemma 系が JSON で変化の説明と 1〜4 手の計画を返し反省メモを持つ構成だった。1 位は手作りのツールを減らすほど良かったと報告している(https://arcprize.org/blog/arc-prize-2026-milestone-1)。llm-tricks は後者のような安い工夫を、API 経由のモデルに移したものにあたる。</p>
+<p>実行可能な世界モデルを LLM に書かせる研究は既にある。WorldCoder(https://arxiv.org/abs/2402.12275)はコードで世界モデルを書き、環境との相互作用で直す。Hypothesis Search(https://arxiv.org/abs/2309.05660)は仮説を生成して検証する。ARC-AGI-3 に対しては、Rodionov が Python の世界モデルを観測で検証しながら計画に使い(https://arxiv.org/abs/2605.05138、GPT-5.5 で公開 25 ゲームの平均 RHAE 58.12%)、Tycho が仮説の構築・検証・修復を扱い、モデルの再現精度が高くてもゴールの特定が良くなるとは限らないことを示した(https://arxiv.org/abs/2607.28287)。OPINE-World(https://arxiv.org/abs/2607.01531)と Rodionov の続報(https://arxiv.org/abs/2607.15439)は調査メモに挙げたが、本文は精読していない。</p>
+<p>以上から、仮説プログラムを手元で反証すること自体は新しくない。本課題が足したと考えるのは二点で、一つは、この枠組みを物理のロボットアームによる ARC-AGI-3 風の課題に適用したこと、もう一つは、ロボットの行動が高コストで取り消せないことを動機に、生き残った仮説を最もよく見分ける実験(行動)を選ぶようにしたことである。後者について、調べた範囲では明示的な例を見つけられなかったが、それは新規性の証明ではない。調査は限られており、見落としている可能性が高い。</p>
+
+<h2>10. 講義との関連</h2>
+<p>再現可能な環境という観点では、依存を <code>uv</code> と <code>requirements.txt</code> のバージョン固定で揃え、物理シミュレーションを決定的にし、レベルの初期配置をコードで固定した。さらに LLM とのやり取りをすべて記録して、あとから同じ判断を再生できる。環境と評価を壊さずに回し続け、結果の出どころを追えるようにするという意味で、ロボットの運用(RobOps)の最小の形を試したと考えている。評価も 1 コマンドで再実行でき、最終実行は 1 本のスクリプトにまとめた。</p>
+<p>もう一つは、オープンソースのシミュレータの価値である。Genesis がオープンなので、見た目だけのタイルの出し入れやランプの追加、把持の調整といった環境側の改造を自由にでき、既存のベンチマークを使うだけでなく、自分の問いに合わせた評価環境を作れた。中身が開かれているからこそ、動作の原因を確かめながら直せる点が、ブラックボックスな環境との大きな違いだった。</p>
+<p class="small">再現手順は README を参照(<code>./run.sh</code>, <code>./eval.sh</code>, <code>scripts/final_run.sh</code>)。Python 3.11 / Genesis 1.4.4 / PyTorch 2.14.1。</p>
 </body></html>

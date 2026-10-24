@@ -1,0 +1,142 @@
+{
+ "random": {
+  "label": "random",
+  "episodes": 200,
+  "cap": 200,
+  "levels": {
+   "1": {
+    "optimal": 6,
+    "solve_rate": 0.01,
+    "mean_actions_to_solve": 108,
+    "mean_actions_unsolved_as_cap": 199.1,
+    "mean_llm_requests": 0
+   },
+   "2": {
+    "optimal": 6,
+    "solve_rate": 0.005,
+    "mean_actions_to_solve": 46,
+    "mean_actions_unsolved_as_cap": 199.2,
+    "mean_llm_requests": 0
+   },
+   "3": {
+    "optimal": 6,
+    "solve_rate": 0.005,
+    "mean_actions_to_solve": 110,
+    "mean_actions_unsolved_as_cap": 199.6,
+    "mean_llm_requests": 0
+   }
+  }
+ },
+ "heuristic": {
+  "label": "offline heuristic",
+  "episodes": 200,
+  "cap": 200,
+  "levels": {
+   "1": {
+    "optimal": 6,
+    "solve_rate": 1.0,
+    "mean_actions_to_solve": 6,
+    "mean_actions_unsolved_as_cap": 6,
+    "mean_llm_requests": 0
+   },
+   "2": {
+    "optimal": 6,
+    "solve_rate": 1.0,
+    "mean_actions_to_solve": 8,
+    "mean_actions_unsolved_as_cap": 8,
+    "mean_llm_requests": 0
+   },
+   "3": {
+    "optimal": 6,
+    "solve_rate": 1.0,
+    "mean_actions_to_solve": 6,
+    "mean_actions_unsolved_as_cap": 6,
+    "mean_llm_requests": 0
+   }
+  }
+ },
+ "llm-hypo": {
+  "label": "gemini-3.1-flash-lite [llm-hypo]",
+  "episodes": 3,
+  "cap": 40,
+  "levels": {
+   "1": {
+    "optimal": 6,
+    "solve_rate": 1.0,
+    "mean_actions_to_solve": 6,
+    "mean_actions_unsolved_as_cap": 6,
+    "mean_llm_requests": 1.7
+   },
+   "2": {
+    "optimal": 6,
+    "solve_rate": 0.6666666666666666,
+    "mean_actions_to_solve": 29,
+    "mean_actions_unsolved_as_cap": 32.7,
+    "mean_llm_requests": 18.7
+   },
+   "3": {
+    "optimal": 6,
+    "solve_rate": 0.0,
+    "mean_actions_to_solve": null,
+    "mean_actions_unsolved_as_cap": 40,
+    "mean_llm_requests": 27.3
+   }
+  }
+ },
+ "llm-tricks": {
+  "label": "gemini-3.1-flash-lite [llm-tricks]",
+  "episodes": 3,
+  "cap": 40,
+  "levels": {
+   "1": {
+    "optimal": 6,
+    "solve_rate": 0.6666666666666666,
+    "mean_actions_to_solve": 6,
+    "mean_actions_unsolved_as_cap": 17.3,
+    "mean_llm_requests": 5
+   },
+   "2": {
+    "optimal": 6,
+    "solve_rate": 0.3333333333333333,
+    "mean_actions_to_solve": 6,
+    "mean_actions_unsolved_as_cap": 28.7,
+    "mean_llm_requests": 9.3
+   },
+   "3": {
+    "optimal": 6,
+    "solve_rate": 0.0,
+    "mean_actions_to_solve": null,
+    "mean_actions_unsolved_as_cap": 40,
+    "mean_llm_requests": 16
+   }
+  }
+ },
+ "llm-plain": {
+  "label": "gemini-3.1-flash-lite [llm-plain]",
+  "episodes": 2,
+  "cap": 40,
+  "levels": {
+   "1": {
+    "optimal": 6,
+    "solve_rate": 0.5,
+    "mean_actions_to_solve": 6,
+    "mean_actions_unsolved_as_cap": 23,
+    "mean_llm_requests": 25.5
+   },
+   "2": {
+    "optimal": 6,
+    "solve_rate": 1.0,
+    "mean_actions_to_solve": 6,
+    "mean_actions_unsolved_as_cap": 6,
+    "mean_llm_requests": 9.5
+   },
+   "3": {
+    "optimal": 6,
+    "solve_rate": 0.5,
+    "mean_actions_to_solve": 20,
+    "mean_actions_unsolved_as_cap": 30,
+    "mean_llm_requests": 43.5
+   }
+  }
+ }
+}

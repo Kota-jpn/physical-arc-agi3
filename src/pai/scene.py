@@ -1,23 +1,25 @@
-"""Genesis tabletop scene + Franka Panda controller (IK + joint-space motion)."""
+"""Genesis tabletop scene for Physical ARC-AGI-3: board tiles, lamp, cubes + Franka Panda controller.
+
+The floor tiles / lamp are purely visual (no collision) and are only *displayed* here: what they
+show is decided by the rules in game.py. Fixed tile entities are moved with set_pos to change colour.
+"""
 import numpy as np
 import genesis as gs
 
-CUBE = 0.04          # cube edge [m]
-PLATE_R, PLATE_H = 0.075, 0.012
+from .game import CUBES
+from .grid import ARC, CUBE, N, PITCH, X0, Y0, cell_center, rgb
 
-# id -> (kind, color rgb, initial xy, description)
-OBJECTS = {
-    "red_cube":    ("cube",  (0.90, 0.10, 0.10), (0.50, 0.18)),
-    "green_cube":  ("cube",  (0.10, 0.75, 0.20), (0.42, -0.05)),
-    "blue_cube":   ("cube",  (0.15, 0.30, 0.95), (0.60, 0.00)),
-    "yellow_cube": ("cube",  (0.95, 0.85, 0.10), (0.38, 0.25)),
-    "blue_plate":  ("plate", (0.20, 0.45, 0.85), (0.50, -0.22)),
-}
-DESCRIPTIONS = {
-    "red_cube": "red cube (赤いキューブ)", "green_cube": "green cube (緑のキューブ)",
-    "blue_cube": "blue cube (青いキューブ)", "yellow_cube": "yellow cube (黄色いキューブ)",
-    "blue_plate": "blue plate (青い皿), fixed on the table",
-}
+TILE = 0.058                    # tile edge; the frame below is PITCH wide
+POOL = 6                        # coloured tile entities available per colour
+HIDDEN = -0.2                   # z where unused visual entities wait
+LAMP_XY = (X0 + PITCH * N / 2, Y0 + PITCH * N + 0.07)
+
+
+def col(i):
+    return tuple(v / 255 for v in rgb(i))
+
+
+OPEN = 0.03           # finger opening (per finger): narrow, so neighbouring cells are not touched
 HAND_OFFSET = 0.105   # hand-link height above cube centre when grasping
 QUAT_DOWN = np.array([0.0, 1.0, 0.0, 0.0])
 
@@ -30,22 +32,17 @@ class Sim:
             sim_options=gs.options.SimOptions(dt=0.01, substeps=2),
             vis_options=gs.options.VisOptions(show_world_frame=False),
         )
-        self.scene.add_entity(gs.morphs.Plane())
+        self.scene.add_entity(gs.morphs.Plane(), surface=gs.surfaces.Default(color=(0.02, 0.02, 0.02)))
         self.robot = self.scene.add_entity(
             gs.morphs.MJCF(file="xml/franka_emika_panda/panda.xml"))
+        self._build_board()
         self.ent = {}
-        for name, (kind, col, (x, y)) in OBJECTS.items():
-            surf = gs.surfaces.Default(color=col)
-            if kind == "cube":
-                self.ent[name] = self.scene.add_entity(
-                    gs.morphs.Box(size=(CUBE,) * 3, pos=(x, y, CUBE / 2)),
-                    material=gs.materials.Rigid(friction=2.0), surface=surf)
-            else:
-                self.ent[name] = self.scene.add_entity(
-                    gs.morphs.Cylinder(radius=PLATE_R, height=PLATE_H,
-                                       pos=(x, y, PLATE_H / 2), fixed=True), surface=surf)
-        self.cam = self.scene.add_camera(res=res, pos=(1.45, -0.95, 1.0),
-                                         lookat=(0.38, 0.0, 0.15), fov=45, GUI=False)
+        for name, colour in CUBES.items():
+            self.ent[name] = self.scene.add_entity(
+                gs.morphs.Box(size=(CUBE,) * 3, pos=(0, 0, HIDDEN)),
+                material=gs.materials.Rigid(friction=2.0), surface=gs.surfaces.Default(color=col(colour)))
+        self.cam = self.scene.add_camera(res=res, pos=(1.0, -0.72, 0.85), lookat=(0.52, 0.0, 0.03),
+                                         fov=45, GUI=False)
         self.scene.build()
         self.hand = self.robot.get_link("hand")
         self.arm = np.arange(7)
@@ -62,6 +59,62 @@ class Sim:
         self.robot.control_dofs_position(home)
         for _ in range(30):
             self.step()
+
+    # ---- board (visual only) ---------------------------------------------
+    def _visual(self, morph_cls, colour, **kw):
+        return self.scene.add_entity(morph_cls(collision=False, fixed=True, **kw),
+                                     surface=gs.surfaces.Default(color=colour))
+
+    def _build_board(self):
+        side = PITCH * N + 0.02
+        self._visual(gs.morphs.Box, (0.2, 0.2, 0.2), size=(side, side, 0.002),
+                     pos=(X0 + PITCH * N / 2, Y0 + PITCH * N / 2, 0.001))
+        self.frame, self.pool = {}, {c: [] for c in range(1, 10)}
+        for r in range(N):
+            for c in range(N):
+                x, y = cell_center((r, c))
+                self.frame[(r, c)] = self._visual(gs.morphs.Box, (1, 1, 1), size=(PITCH - 0.002,) * 2 + (0.003,),
+                                                  pos=(x, y, HIDDEN))
+                self._visual(gs.morphs.Box, col(0), size=(TILE, TILE, 0.004), pos=(x, y, 0.002))
+        for colour, lst in self.pool.items():
+            lst += [self._visual(gs.morphs.Box, col(colour), size=(TILE, TILE, 0.0045), pos=(0, 0, HIDDEN))
+                    for _ in range(POOL)]
+        self.shown = {}                                  # cell -> (colour, entity) currently on the floor
+        lx, ly = LAMP_XY
+        self._visual(gs.morphs.Box, (0.25, 0.25, 0.25), size=(0.05, 0.05, 0.08), pos=(lx, ly, 0.04))
+        self.bulb = {on: self._visual(gs.morphs.Sphere, col(3 if on else 5), radius=0.04, pos=(lx, ly, HIDDEN if on else 0.12))
+                     for on in (False, True)}
+
+    def show(self, fb):
+        """Display a game.Feedback: tile colours, bordered (lit) tiles and the lamp."""
+        want = {c: v for c, v in fb.floor.items() if v}
+        for cell, (colour, e) in list(self.shown.items()):
+            if want.get(cell) != colour:
+                e.set_pos(np.array([0, 0, HIDDEN]))
+                self.pool[colour].append(e)
+                del self.shown[cell]
+        for cell, colour in want.items():
+            if cell not in self.shown:
+                e = self.pool[colour].pop()
+                x, y = cell_center(cell)
+                e.set_pos(np.array([x, y, 0.00225]))
+                self.shown[cell] = (colour, e)
+        for cell, e in self.frame.items():
+            x, y = cell_center(cell)
+            e.set_pos(np.array([x, y, 0.0015 if cell in fb.lit else HIDDEN]))
+        lx, ly = LAMP_XY
+        self.bulb[fb.lamp].set_pos(np.array([lx, ly, 0.12]))
+        self.bulb[not fb.lamp].set_pos(np.array([lx, ly, HIDDEN]))
+
+    def load_level(self, level, fb):
+        """Put the cubes of `level` on their start cells (all cubes exist in every level) and show `fb`."""
+        self.show(fb)
+        for name, cell in level.start.items():
+            x, y = cell_center(cell)
+            self.ent[name].set_pos(np.array([x, y, CUBE / 2]))
+            self.ent[name].set_quat(np.array([1.0, 0, 0, 0]))
+        self.open_gripper()
+        self.hold(30)
 
     # ---- stepping / recording hook -------------------------------------
     def step(self):
@@ -101,7 +154,7 @@ class Sim:
     def open_gripper(self, steps=30):
         cur = self.robot.get_dofs_position().cpu().numpy()[7:9]
         for i in range(1, steps + 1):                   # ramp: abrupt opening kicks the cubes
-            q = cur + (0.04 - cur) * (i / steps)
+            q = cur + (OPEN - cur) * (i / steps)
             self.robot.control_dofs_position(q, self.fingers)
             self.step()
 
@@ -138,17 +191,3 @@ class Sim:
         self.move_to((hx, hy, hz + 0.05), steps=100)   # slow vertical retreat (no tower tipping)
         self.move_to((hx, hy, clear_z), steps=60)
         self.go_home(80)
-
-    def teleport(self, name, xyz):
-        """External disturbance (used to demo failure recovery)."""
-        self.ent[name].set_pos(np.asarray(xyz, dtype=float))
-        self.hold(20)
-
-    def reset(self):
-        """Put all objects back to their initial poses and reopen the gripper."""
-        for name, (kind, _, (x, y)) in OBJECTS.items():
-            if kind == "cube":
-                self.ent[name].set_pos(np.array([x, y, CUBE / 2]))
-                self.ent[name].set_quat(np.array([1.0, 0, 0, 0]))
-        self.open_gripper()
-        self.hold(30)
