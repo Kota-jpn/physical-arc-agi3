@@ -71,10 +71,10 @@ Google の OpenAI 互換エンドポイント (`https://generativelanguage.googl
 
 `run.sh` (`pai.run`) のオプション: `--video PATH`, `--agent {llm-plain,llm-tricks,llm-hypo}` (既定 llm-hypo), `--offline`, `--no-render`, `--speed N` または `--speed N,N,N` (動画の再生倍率。レベルごとに指定可。既定 4。画面に `N倍速` と表示), `--cap N` (レベルあたりの行動数上限。既定 40), `--replay agent_log.jsonl` (過去の実行で実際に行われた判断を再生して動画を作り直す。API は呼ばない), `--remark N=TEXT` (レベル N のクリア画面に一文を足す), `--levels N ...` (一部のレベルだけ実行)。
 
-提出動画は次のコマンドで作り直したものです (1920x1080、AI は呼ばない):
+提出動画は次のコマンドで作り直したものです (1920x1080、AI は呼ばない)。再生では、記録した AI の応答 (仮説のコード) を同じ反証コード (`hypo.falsify`) に通し、生きている仮説と、直前の観察で捨てた仮説を画面右に表示します (`ReplayAgent`、表示用の和訳は `video/hypo_ja.json`)。探索による除外は表示しません (10-28 の実行後に探索のコードを直したため、今のコードでは当時と一致しないため)。AI が栗色 (マルーン) を「マラソン」「マーロン」と書いた箇所は、表示のときだけ「栗色」に直しています:
 
 ```bash
-PYTHONPATH=src python -m pai.run --replay outputs/agent_log_demo_spliced.jsonl --cap 30 --speed 4,6,8,6 \
+PYTHONPATH=src python -m pai.run --replay outputs/agent_log_demo_spliced.jsonl --cap 30 --speed 6,9,11,9 \
   --remark '3=このレベルだけ、点いた数と一致する量を AI に見せる版で撮り直した。AI の予想は 4 段だった。' \
   --remark '4=AI は持ち上げて測った重さ (青 0.30 / 黄 0.20 / 緑 0.10 / 赤 0.04 kg) を使って仮説を立てていた。' \
   --video outputs/demo.mp4

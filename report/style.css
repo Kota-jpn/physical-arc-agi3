@@ -15,3 +15,11 @@ figure { margin: 1em 0; page-break-inside: avoid; }
 img { max-width: 85%; border: 1px solid #d0d7de; }
 figcaption { font-size: .9em; color: #59636e; }
 h2, h3 { break-after: avoid; }
+nav#TOC { border: 1px solid #d0d7de; border-radius: 6px; padding: .4em 1.2em; margin: 1.2em 0; font-size: .95em; }
+nav#TOC ul { list-style: none; padding-left: 1.2em; margin: .2em 0; }
+nav#TOC > ul { padding-left: 0; }
+nav#TOC a { color: #1f2328; }
+.header-section-number { margin-right: .5em; }
+h1:not(.title) { font-size: 1.3em; border-bottom: 1px solid #d0d7de; padding-bottom: .25em; margin-top: 1.6em; break-after: avoid; }
+h2 { font-size: 1.1em; border-bottom: none; margin-top: 1.3em; }
+header .author, header .date { margin: .2em 0; color: #1f2328; font-size: 1em; }

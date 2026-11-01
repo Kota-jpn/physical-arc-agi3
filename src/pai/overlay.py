@@ -3,6 +3,7 @@
 The HUD is written for a first-time viewer: Japanese labels, the action in words, what changed, and the
 number of hypotheses still alive. The camera image fills the left 1440x810 area under the top bar.
 """
+import json
 import os
 import re
 from dataclasses import dataclass, field
@@ -24,6 +25,8 @@ _REGULAR = ["/System/Library/Fonts/ヒラギノ角ゴシック W3.ttc",
 _MONO = ["/System/Library/Fonts/Menlo.ttc", "/usr/share/fonts/truetype/dejavu/DejaVuSansMono-Bold.ttf"]
 _cache = {}
 COLOUR_JA = {"red": "赤", "blue": "青", "green": "緑", "yellow": "黄"}
+_JA_PATH = os.path.join(os.path.dirname(__file__), "..", "..", "video", "hypo_ja.json")
+HYPO_JA = json.load(open(_JA_PATH)) if os.path.exists(_JA_PATH) else {}   # hypothesis descriptions -> Japanese (video only)
 
 
 def font(size, kind="bold"):
@@ -64,6 +67,11 @@ def ja_effect(effect):
     return "、".join(parts) or "変化なし"
 
 
+def ja_said(text):
+    """The model sometimes misspells maroon (マルーン) as マラソン / マーロン; show it as 栗色 (the colour name used on screen)."""
+    return re.sub(r"マラソン|マーロン", "栗色", text or "")
+
+
 def ja_note(note):
     """'仮説 3→1 | 検証: ...' -> ('3 → 1', purpose)."""
     m = re.search(r"仮説 (\d+)→(\d+)", note or "")
@@ -93,6 +101,9 @@ class Hud:
     speed: str = ""
     felt: dict = field(default_factory=dict)        # cube -> weight [kg] the arm felt in this level
     failed: set = field(default_factory=set)        # levels not solved within the cap
+    pool: list = field(default_factory=list)        # replay only: descriptions of the hypotheses still alive
+    gone: list = field(default_factory=list)        # replay only: hypotheses discarded by the last observation
+    banner: bool = False                            # show the "discarded" banner over the camera image
 
 
 def wrap(d, text, fnt, width):
@@ -150,46 +161,69 @@ def compose(rgb_frame, hud):
     d.text((PANEL + 100, 10), "ランプ (ゴール)", font=font(22), fill=GREY)
     d.text((PANEL + 100, 38), "点灯 = クリア!" if hud.lamp else "消灯 = まだ", font=font(32),
            fill=GREEN if hud.lamp else WHITE)
-    # right panel: what the AI sees, legend, hypotheses left, speed
+    # right panel: what the AI sees, legend, felt weights, the hypotheses the AI wrote as code
     x0 = PANEL + 38
-    d.text((x0, TOP + 18), "AI が受け取る盤面", font=font(28), fill=WHITE)
-    d.text((x0, TOP + 56), "(色を数字 0〜9 にした 6×6 の表)", font=font(20, "regular"), fill=GREY)
+    d.text((x0, TOP + 14), "AI が受け取る盤面", font=font(28), fill=WHITE)
+    d.text((x0, TOP + 50), "(色を数字 0〜9 にした 6×6 の表)", font=font(20, "regular"), fill=GREY)
     if hud.grid:
-        draw_grid(d, hud.grid, hud.lit, hud.target, x0, TOP + 96)
-    y = TOP + 520
-    d.rectangle([x0, y + 4, x0 + 30, y + 34], outline=WHITE, width=5)
-    d.text((x0 + 46, y + 2), "反応したタイル", font=font(24, "regular"), fill=WHITE)
-    d.rectangle([x0 + 236, y + 4, x0 + 266, y + 34], outline=YELLOW, width=5)
-    d.text((x0 + 282, y + 2), "いま触るマス", font=font(24, "regular"), fill=WHITE)
+        draw_grid(d, hud.grid, hud.lit, hud.target, x0 + 60, TOP + 84, cs=46, g=4)
+    y = TOP + 394
+    d.rectangle([x0, y + 4, x0 + 26, y + 30], outline=WHITE, width=5)
+    d.text((x0 + 38, y + 2), "反応したタイル", font=font(22, "regular"), fill=WHITE)
+    d.rectangle([x0 + 220, y + 4, x0 + 246, y + 30], outline=YELLOW, width=5)
+    d.text((x0 + 258, y + 2), "いま触るマス", font=font(22, "regular"), fill=WHITE)
     if hud.felt:
-        d.text((x0, y + 52), "手で測った重さ:", font=font(24, "regular"), fill=GREY)
-        x = x0 + 180
+        d.text((x0, y + 42), "重さ kg:", font=font(22, "regular"), fill=GREY)
+        x = x0 + 92
         for cube, kg in hud.felt.items():
-            t = f"{kg:.2f}kg"
-            d.rectangle([x, y + 56, x + 22, y + 78], fill=rgb(CUBES[cube]))
-            d.text((x + 28, y + 52), t, font=font(22, "regular"), fill=WHITE)
-            x += 34 + d.textlength(t, font=font(22, "regular")) + 12
-            if x > W - 120:
+            t = f"{kg:.2f}"
+            d.rectangle([x, y + 46, x + 20, y + 66], fill=rgb(CUBES[cube]))
+            d.text((x + 26, y + 42), t, font=font(22, "regular"), fill=WHITE)
+            x += 26 + d.textlength(t, font=font(22, "regular")) + 12
+    y = TOP + 482
+    if hud.pool or hud.gone:
+        d.line([x0, y, W - 30, y], fill=DARK, width=2)
+        d.text((x0, y + 10), "AI がコードで書いた仮説", font=font(28), fill=YELLOW)
+        d.text((x0, y + 48), "ランプが点く条件。観察と合わなければ捨てる", font=font(19, "regular"), fill=GREY)
+        y += 84
+        f = font(25)
+        for desc, ok in [(g, False) for g in hud.gone] + [(p, True) for p in hud.pool]:
+            lines = wrap(d, HYPO_JA.get(desc, desc), f, W - 30 - (x0 + 36))[:2]
+            if y + 34 * len(lines) > BOTTOM - 50:
                 break
-    pool, purpose = ja_note(hud.note)
-    if pool:
-        d.text((x0, y + 112), "残っている仮説の数", font=font(24), fill=GREY)
-        d.text((x0, y + 142), pool, font=font(50, "mono"), fill=YELLOW)
-        d.text((x0, y + 206), purpose, font=font(24, "regular"), fill=WHITE)
+            d.text((x0, y), "・" if ok else "×", font=f, fill=WHITE if ok else RED)
+            for ln in lines:
+                d.text((x0 + 36, y), ln, font=f, fill=WHITE if ok else RED)
+                if not ok:
+                    d.line([x0 + 36, y + 17, x0 + 36 + d.textlength(ln, font=f), y + 17], fill=RED, width=3)
+                y += 34
+            y += 10
+    if hud.banner and hud.gone:                    # the moment a hypothesis is thrown away
+        f1, f2 = font(46), font(38)
+        texts = [HYPO_JA.get(g, g) for g in hud.gone]
+        w = max([d.textlength("× 観察と合わない仮説を捨てた", font=f1)] + [d.textlength(f"「{t}」", font=f2) for t in texts])
+        bx, by = (PANEL - w) / 2 - 30, TOP + 110
+        d.rectangle([bx, by, bx + w + 60, by + 90 + 58 * len(texts)], fill=BLACK, outline=RED, width=6)
+        d.text((bx + 30, by + 18), "× 観察と合わない仮説を捨てた", font=f1, fill=RED)
+        for k, t in enumerate(texts):
+            d.text((bx + 30, by + 86 + 58 * k), f"「{t}」", font=f2, fill=WHITE)
     if hud.speed:
         d.rectangle([20, TOP + 20, 180, TOP + 76], fill=BLACK)
         d.text((36, TOP + 26), hud.speed, font=font(34), fill=YELLOW)
     # bottom bar: hypothesis, action and its effect, agent
     d.line([0, BOTTOM, W, BOTTOM], fill=DARK, width=2)
-    d.text((30, BOTTOM + 12), "AI の仮説 (いま考えているルール)", font=font(22), fill=YELLOW)
-    for i, ln in enumerate(wrap(d, hud.hypothesis, font(36), W - 60)[:2]):
+    d.text((30, BOTTOM + 12), "AI のことば (いまの考え)", font=font(22), fill=YELLOW)
+    said = ja_said(hud.hypothesis)
+    for i, ln in enumerate(wrap(d, said, font(36), W - 60)[:2]):
         d.text((30, BOTTOM + 42 + 46 * i), ln, font=font(36), fill=WHITE)
     if hud.action:
         y = BOTTOM + 136
         d.text((30, y), "行動:", font=font(28), fill=GREY)
-        d.text((112, y), hud.action, font=font(28), fill=WHITE)
+        purpose = ja_note(hud.note)[1]
+        act = hud.action + (f" ({purpose})" if purpose else "")
+        d.text((112, y), act, font=font(28), fill=WHITE)
         if hud.effect:
-            x = 112 + d.textlength(hud.action, font=font(28)) + 20
+            x = 112 + d.textlength(act, font=font(28)) + 20
             ok = hud.effect != "変化なし"
             d.text((x, y), "→ " + hud.effect, font=font(28), fill=GREEN if ok else GREY)
     d.text((PANEL + 38, BOTTOM - 40), f"AI: {hud.agent}", font=font(20, "regular"), fill=CYAN)
@@ -237,24 +271,14 @@ def title_card(bg=None):
                  ("触って、試して、ルールを見つける", 54, YELLOW)], y=250, bg=bg)
 
 
-def arc_card():
-    return card([("ARC-AGI-3 とは?", 60, YELLOW),
-                 ("", 20, WHITE),
-                 ("説明なしで始まるゲームを、遊びながらルールを見つけて解く AI のテスト", 40, WHITE),
-                 ("人間はすべて解ける。公開時 (2026年3月) の最先端 AI は 1% 未満", 40, WHITE),
-                 ("", 30, WHITE),
-                 ("この「初めての状況で、その場でルールを学ぶ力」を", 40, WHITE),
-                 ("ロボットアームの机の上で試せるようにした", 40, GREEN)], y=260)
-
-
 def rules_card():
-    return card([("このロボットのゲーム", 60, YELLOW),
+    return card([("ルールもゴールも教えない", 64, YELLOW),
                  ("", 20, WHITE),
-                 ("できる行動は 2 つだけ: キューブを「つかむ」、マスに「置く」", 40, WHITE),
-                 ("ゴール: 盤の横のランプを緑にする (何をすれば点くかは秘密)", 40, WHITE),
-                 ("4 レベルあり、それぞれ隠れたルールが違う。少ない行動回数ほど良い", 40, WHITE),
+                 ("ロボットにできるのは、キューブを「つかむ」と、マスに「置く」の 2 つだけ", 40, WHITE),
+                 ("盤の横のランプが緑になればクリア。何をすれば点くかは秘密", 40, WHITE),
+                 ("4 レベルあり、それぞれ隠れたルールが違う", 40, WHITE),
                  ("", 30, WHITE),
-                 ("AI (Gemini) は毎回「いまの仮説」と「次の一手」を考え、ロボットが実行する", 36, CYAN)], y=260)
+                 ("元ネタは ARC-AGI-3: 説明なしのゲームで、その場でルールを学ぶ力を測る AI のテスト", 32, CYAN)], y=250)
 
 
 def method_card():
@@ -275,8 +299,8 @@ def method_card():
         if i < 2:
             ax = bx + bw + 20
             d.polygon([(ax, y + 100), (ax + 60, y + 120), (ax, y + 140)], fill=YELLOW)
-    for k, t in enumerate(["ロボットの一手は取り消せないので、頭の中 (コード) で見分けてから動く。",
-                           "画面右の「残っている仮説の数」がこの絞り込みを表す。"]):
+    for k, t in enumerate(["ロボットの一手は取り消せないので、コードの上で仮説を見分けてから動く。",
+                           "画面の右に AI が書いた仮説が並び、観察と合わないものに × が付く。"]):
         w = d.textlength(t, font=font(34, "regular"))
         d.text(((W - w) / 2, 720 + 58 * k), t, font=font(34, "regular"), fill=WHITE)
     return np.asarray(img)
@@ -288,8 +312,8 @@ def guide_card(frame):
     img = Image.blend(src, Image.new("RGB", (W, H), BLACK), 0.6)
     d = ImageDraw.Draw(img)
     regions = [((20, TOP + 20, PANEL - 20, BOTTOM - 20), "ロボットと盤面 (物理シミュレーション)", (420, TOP + 50)),
-               ((PANEL + 20, TOP + 8, W - 20, TOP + 610), "AI に渡される情報", (PANEL + 40, TOP + 640)),
-               ((10, BOTTOM + 4, W - 10, H - 4), "AI の仮説と、いまの行動・結果", (1100, BOTTOM + 30)),
+               ((PANEL + 20, TOP + 8, W - 20, BOTTOM - 10), "AI に渡す盤面と、AI が書いた仮説", (720, TOP + 250)),
+               ((10, BOTTOM + 4, W - 10, H - 4), "AI のことばと、いまの行動・結果", (1100, BOTTOM + 30)),
                ((940, 4, W - 20, TOP - 4), "行動回数 (少ないほど良い) とランプ (緑ならクリア)", (560, TOP + 140))]
     for box, _, _ in regions:
         img.paste(src.crop(box), box[:2])
@@ -319,7 +343,7 @@ def level_card(n, actions, optimal, rule, last_hypothesis, remark="", solved=Tru
                  (rule, 42, WHITE),
                  ("", 20, WHITE),
                  ("AI が最後に立てていた仮説:", 32, GREY, "regular"),
-                 (f"「{last_hypothesis}」", 34, CYAN, "regular"),
+                 (f"「{ja_said(last_hypothesis)}」", 34, CYAN, "regular"),
                  ("", 20, WHITE),
                  (remark, 34, YELLOW)], y=150)
 

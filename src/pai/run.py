@@ -33,12 +33,13 @@ class Recorder:
     def __init__(self, path, hud):
         self.w = imageio.get_writer(path, fps=FPS, codec="libx264", quality=None, pixelformat="yuv420p",
                                     macro_block_size=8, ffmpeg_params=["-crf", "16", "-preset", "slow"]) if path else None
-        self.hud, self.n, self.last = hud, 0, None
+        self.hud, self.n, self.last, self.rgb = hud, 0, None, None
         self.marks = []                            # [name, start s, length s] of each card (for the narration)
         self.seconds = {}                          # card name -> length override (--cards)
 
     def frame(self, rgb):
         if self.w:
+            self.rgb = rgb
             self.last = overlay.compose(rgb, self.hud)
             self.w.append_data(self.last)
             self.n += 1
@@ -161,7 +162,7 @@ def main(argv=None):
         sim.hook, first = None, Game(a.levels[0])
         sim.load_level(first.level, first.fb)
         backdrop, sim.hook = sim.cam.render()[0], rec.frame
-    for img, sec, name in [(overlay.title_card(backdrop), 5, "title"), (overlay.arc_card(), 8, "arc"),
+    for img, sec, name in [(overlay.title_card(backdrop), 5, "title"),
                            (overlay.rules_card(), 7, "rules"), (overlay.method_card(), 9, "method")]:
         rec.raw(img, sec, name)
     for lv, speed in zip(LEVELS, speeds):
@@ -176,7 +177,7 @@ def main(argv=None):
         agent.reset()
         hud.hypothesis = "(まだ何も知らない。ルールもゴールも教えられていない)"
         hud.action = hud.effect = hud.note = ""
-        hud.target, hud.callouts = None, []
+        hud.target, hud.callouts, hud.pool, hud.gone = None, [], [], []
         sync_hud(hud, game)
         sim.load_level(lv, game.fb)
         sim.hold(60)
@@ -193,6 +194,15 @@ def main(argv=None):
                 rec.close()
                 return 3
             log({"agent": agent.label, "decision": d})
+            if getattr(agent, "track", None) is not None:              # replay: hypotheses alive / just discarded
+                hud.pool, hud.gone = [h.desc for h in agent.pool], [h.desc for h in agent.gone]
+                print("POOL", json.dumps({"level": lv.n, "n": game.actions, "pool": hud.pool, "gone": hud.gone,
+                                          "note": d.get("note", "")}, ensure_ascii=False))
+                if hud.gone and rec.rgb is not None:   # hold the frame so the viewer sees which hypothesis was dropped
+                    tl.setdefault(f"discard_l{lv.n}", rec.t())
+                    hud.banner = True
+                    rec.raw(overlay.compose(rec.rgb, hud), 2.2)
+                    hud.banner = False
             hud.hypothesis, hud.note = d["hypothesis"], d.get("note", "")
             hud.action, hud.effect, hud.target = overlay.ja_action(d["action"]), "", target_cell(game, d["action"])
             hud.callouts, before = [], dict(game.fb.floor)

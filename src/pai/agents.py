@@ -543,15 +543,40 @@ class ReplayAgent:
     re-render the video. run.py logs every executed decision as {"agent", "decision"}; nothing new is decided."""
 
     def __init__(self, path):
-        recs = [r for r in map(json.loads, open(path)) if "decision" in r]
-        self.label = recs[0]["agent"]
-        self.answers = iter(r["decision"] for r in recs)
+        self.recs = [r for r in map(json.loads, open(path)) if "decision" in r or "response" in r]
+        self.label = next(r["agent"] for r in self.recs if "decision" in r)
+        self.i = 0
+        # For the video only: replay the logged answers through the same hypo code (parse, falsify, search) to show
+        # which hypotheses are alive and which were just discarded. It never changes the replayed decisions.
+        self.track = LLMAgent("hypo", chat=lambda m: "") if any("response" in r for r in self.recs) else None
+        self.pool, self.gone = [], []
 
     def reset(self):
         pass
 
     def act(self, obs, legal):
-        return next(self.answers)
+        t = self.track
+        if t is not None:
+            if obs["level"] != t.level:
+                t._new_level(obs)
+            t._observe(obs)
+            alive = list(t.pool)
+        while "decision" not in self.recs[self.i]:
+            r = self.recs[self.i]
+            self.i += 1
+            if t is not None and r.get("error") is None:
+                try:
+                    d, _ = json.JSONDecoder().raw_decode(r["response"][r["response"].index("{"):])
+                    t._parse(d, obs, False)
+                except Exception:
+                    pass
+        d = self.recs[self.i]["decision"]
+        self.i += 1
+        if t is not None:
+            t._refresh()                   # falsification only: the planner's own drops depend on the code version
+            self.gone = [h for h in alive if h not in t.pool]
+            self.pool = list(t.pool)
+        return d
 
 
 def load_env():
