@@ -9,3 +9,10 @@ outputs/*
 !outputs/agent_log_demo_hypo.jsonl
 outputs/raw/
 report/*.html.tmp
+!outputs/demo_timeline.json
+!outputs/weigh_robustness.json
+video/tts/
+video/narration.wav
+video/credit.png
+!outputs/agent_log_demo_spliced.jsonl
+!outputs/agent_log_live7.jsonl

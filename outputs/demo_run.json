@@ -1,7 +1,12 @@
 {
  "agent": "gemini-3.1-flash-lite [llm-hypo]",
  "cap": 30,
- "speed": 4,
+ "speed": [
+  4,
+  6,
+  8,
+  6
+ ],
  "levels": [
   {
    "level": 1,
@@ -11,12 +16,17 @@
   {
    "level": 2,
    "solved": true,
-   "actions": 6
+   "actions": 22
   },
   {
    "level": 3,
    "solved": true,
-   "actions": 20
+   "actions": 18
+  },
+  {
+   "level": 4,
+   "solved": true,
+   "actions": 26
   }
  ]
 }

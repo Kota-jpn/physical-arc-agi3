@@ -11,18 +11,21 @@ from .grid import N
 CUBES = {"red": 2, "blue": 1, "green": 3, "yellow": 4}     # cube id -> ARC colour
 MAX_H = 4                                                    # max stack height
 GREY = 5
+LIGHT = 0.04                                                 # default cube mass [kg]
 
 
 @dataclass
 class Level:
     n: int
-    kind: str                       # "match" | "switch" | "count"
+    kind: str                       # "match" | "switch" | "count" | "balance"
     tiles: dict                     # cell -> colour shown on the floor (everything else is black 0)
     start: dict                     # cube id -> start cell
     hidden: dict = field(default_factory=dict)   # switch level: grey cell -> colour revealed by the switch
     switch: tuple = None            # switch level: the switch tile
     target: tuple = None            # count level: the tile to build the tower on
     markers: tuple = ()             # count level: the N marker squares
+    mass: dict = field(default_factory=dict)     # cube id -> mass [kg] if not LIGHT (looks the same)
+    pads: tuple = ()                # balance level: the two pans of the scale
     optimal: int = 6                # fewest actions that solve it
 
 
@@ -38,7 +41,16 @@ LEVELS = [
     Level(3, "count", tiles={(0, 0): 6, (0, 1): 6, (0, 2): 6, (3, 3): 8},
           start={"red": (2, 5), "blue": (5, 1), "green": (4, 5), "yellow": (1, 0)},
           target=(3, 3), markers=((0, 0), (0, 1), (0, 2))),
+    # L4: a balance. The cubes weigh differently (unseen). Like a real scale, the heavier maroon pan shows a
+    # border (both when equal); the lamp needs equal loads on both pans. Only blue = green + yellow balances
+    Level(4, "balance", tiles={(2, 1): 9, (2, 4): 9},
+          start={"red": (4, 2), "blue": (0, 2), "green": (5, 4), "yellow": (0, 5)},
+          mass={"blue": 0.3, "yellow": 0.2, "green": 0.1}, pads=((2, 1), (2, 4)), optimal=6),
 ]
+
+
+def mass_of(level, cube):
+    return level.mass.get(cube, LIGHT)
 
 
 @dataclass
@@ -63,10 +75,14 @@ def feedback(level, stacks):
             lit.add(level.switch)
             lit |= {c for c, col in level.hidden.items() if bottom_colour(c) == col}
         lamp = pressed and all(c in lit for c in level.hidden)
-    else:
+    elif level.kind == "count":
         h = height(level.target)
         lit = {m for k, m in enumerate(level.markers, 1) if h >= k}
         lamp = h == len(level.markers)
+    else:
+        left, right = (sum(mass_of(level, c) for c in stacks.get(cell, [])) for cell in level.pads)
+        lamp = left > 0 and right > 0 and abs(left - right) <= 0.02
+        lit = set(level.pads) if lamp else {level.pads[0]} if left > right else {level.pads[1]} if right > left else set()
     return Feedback(floor, frozenset(lit), lamp)
 
 
@@ -128,6 +144,7 @@ class Game:
         self.fb = feedback(self.level, self.stacks)
         self.last_effect, self.last_diff = "", ""
         self.history, self.tried = [], set()        # experiment memory of this level; cells a cube was placed on
+        self.felt = {}                              # cube -> mass [kg] the arm felt when lifting it
 
     @property
     def solved(self):
@@ -141,9 +158,10 @@ class Game:
         """None if the action may be executed, otherwise the reason it cannot."""
         return check(self.stacks, self.held, action)
 
-    def step(self, action, observed=None):
+    def step(self, action, observed=None, felt=None):
         """Execute an action and count it. The new cube layout is applied symbolically, unless
-        `observed=(stacks, held)` is given (derived from the physics simulation)."""
+        `observed=(stacks, held)` is given (derived from the physics simulation). A successful pick
+        weighs the cube: `felt` is the mass estimated from the arm's joint torques (physics), else the true mass."""
         assert self.legal(action) is None, self.legal(action)
         before, heights, top0 = self.fb, {c: len(s) for c, s in self.stacks.items()}, self.top_grid()
         if observed is not None:
@@ -161,17 +179,21 @@ class Game:
         effect = describe_effect(before, self.fb)
         if action["name"] == "pick" and self.held != action["object_id"]:
             effect = "the grasp failed (nothing is held); " + effect
+        weight = ""
+        if action["name"] == "pick" and self.held == action["object_id"]:
+            self.felt[self.held] = round(mass_of(self.level, self.held) if felt is None else felt, 2)
+            weight = f"felt weight {self.felt[self.held]:.2f} kg; "
         text = f"pick({action['object_id']})" if action["name"] == "pick" else f"place({list(action['cell'])})"
         if action["name"] == "place":
             self.tried.add(tuple(action["cell"]))
         top1 = self.top_grid()
         cells = [f"[{r},{c}] {top0[r][c]}->{top1[r][c]}" for r in range(N) for c in range(N) if top0[r][c] != top1[r][c]]
         self.last_effect = effect
-        self.last_diff = "top-view cells changed: " + (", ".join(cells) or "none") + "; " + effect
+        self.last_diff = "top-view cells changed: " + (", ".join(cells) or "none") + "; " + weight + effect
         now = {c: len(s) for c, s in self.stacks.items()}
         moved = ", ".join(f"[{r},{c}] {heights.get((r, c), 0)}->{now.get((r, c), 0)}"
                           for r, c in sorted(set(heights) | set(now)) if heights.get((r, c), 0) != now.get((r, c), 0))
-        self.history.append(f"#{self.actions} {text} -> {effect}" + (f" (stack heights: {moved})" if moved else ""))
+        self.history.append(f"#{self.actions} {text} -> {weight}{effect}" + (f" (stack heights: {moved})" if moved else ""))
         return effect
 
     # ---- what the agent sees ---------------------------------------------------
@@ -193,4 +215,4 @@ class Game:
                 "lamp": self.fb.lamp, "held": self.held, "floor": floor, "top": self.top_grid(),
                 "lit": sorted(list(c) for c in self.fb.lit), "cubes": cubes,
                 "history": self.history[-40:], "last_effect": self.last_effect, "diff": self.last_diff,
-                "untried": sorted(list(c) for c in self.fb.floor if c not in self.tried)}
+                "untried": sorted(list(c) for c in self.fb.floor if c not in self.tried), "felt": dict(self.felt)}

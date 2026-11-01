@@ -164,6 +164,7 @@ Facts you are given:
 - Cells are [row, col], 0-indexed. Row 0 is nearest the robot. Movable objects are solid-colour cubes; a cube's id is its colour name.
 - Actions: {{"name":"pick","object_id":"<cube id>"}} lifts a top cube (gripper must be empty);
   {{"name":"place","cell":[row,col]}} puts the held cube on a cell; placing on an occupied cell stacks (max height {h}).
+- Lifting a cube lets the arm feel its weight (from its joint torques); it is reported in kg. Cubes that look alike may weigh differently.
 - Some unknown condition completes the level; then the lamp turns on. Later levels may use different rules.
 - Every executed action is counted. Solve each level in as few actions as possible.
 How to work:
@@ -189,11 +190,15 @@ TRICKS_REPLY = """Reply with JSON only:
 HYPO_RULES = """- Besides actions, give 2-4 competing hypotheses as short Python functions `def lit(state): ...` that return True exactly when the lamp is ON in a board state.
   Code checks them against every state observed so far and discards the contradicted ones automatically; it then chooses the next experiments itself to
   separate the survivors. So make them concrete, different from each other and falsifiable. Your own `actions` are used only when the code finds no experiment.
+  Draw them from different kinds of explanation, not variants of one idea: identity or colour, position, counting or height,
+  relations between cells or stacks (same, equal, greater), and physical quantities the arm can measure.
   `state` is read-only: state.cubes (list of cube ids); state.cell(id) -> (row, col) or None; state.height_of(id) -> stack index, 0 = on the floor;
   state.colour(id) -> ARC colour; state.stack(cell) -> cube ids bottom..top; state.height(cell) -> number of cubes on the cell; cells are tuples;
   state.tiles -> {{(row, col): colour}} of marked tiles as displayed in the board state (in imagined states: as displayed now);
   state.lit -> set of bordered cells as displayed (None in imagined states, so do not rely on it for predictions).
   state.heights() -> {{cell: number of cubes}} for every non-empty cell. Cells compare equal to lists or tuples.
+  state.mass(id) -> weight in kg felt by the arm; a cube that was never lifted has no known weight yet (code then lifts it to find out);
+    weights are measurements, so == between them (and their sums) means equal within 0.015 kg.
   Only these builtins exist: len range all any sum min max abs sorted set dict list tuple enumerate zip isinstance int bool. No imports.
   Beware that all() of an empty sequence is True.
 """
@@ -218,6 +223,14 @@ def stacks_of(obs):
     return st
 
 
+def board(obs):
+    """Marked tiles, stacks, and the cells the planner may place on (marked, occupied, and one spare cell)."""
+    tiles = {(r, c): v for r, row in enumerate(obs["floor"]) for c, v in enumerate(row) if v}
+    stacks = stacks_of(obs)
+    spare = next(((r, c) for r in reversed(range(N)) for c in reversed(range(N)) if (r, c) not in tiles and (r, c) not in stacks))
+    return tiles, stacks, sorted(set(tiles) | set(stacks) | {spare})
+
+
 def obs_text(obs, lessons, extra=""):
     cubes = "\n".join(f"- {c['id']}: colour={c['colour']} cell={c['cell']} height={c['height']}" for c in obs["cubes"])
     return (f"LEVEL {obs['level']}/{obs['n_levels']} | actions used in this level: {obs['actions']} | "
@@ -225,6 +238,7 @@ def obs_text(obs, lessons, extra=""):
             f"FLOOR (tile colours as displayed):\n{_grid(obs['floor'])}\n"
             f"TOP VIEW (cubes drawn over the tiles):\n{_grid(obs['top'])}\n"
             f"BORDERED (lit) CELLS: {obs['lit']}\nMARKED (non-black) CELLS NOT YET TRIED WITH ANY CUBE: {obs['untried']}\nCUBES:\n{cubes}\n"
+            f"FELT WEIGHTS (kg, cubes lifted in this level): {obs['felt'] or '(none lifted yet)'}\n"
             f"EXPERIMENT MEMORY (this level, oldest first; action -> visible effect):\n"
             + ("\n".join(obs["history"]) or "(no action yet)") +
             f"\nLESSONS FROM PREVIOUS LEVELS: {lessons or '(none)'}" + extra)
@@ -284,12 +298,14 @@ class LLMAgent:
         self.queue, self.explore, self.pool, self.discarded = [], [], [], []
         self.states, self.visited, self.noeffect, self.dead, self.warned = [], set(), set(), [], set()
         self.last, self.pending, self.n0, self.fb_tried = None, None, 0, set()
+        self.felt = {}                     # shared with every State: weights felt so far in this level
 
     def _observe(self, obs):
         from .hypo import State, key_of
         stacks, tiles = stacks_of(obs), {(r, c): v for r, row in enumerate(obs["floor"]) for c, v in enumerate(row) if v}
+        self.felt.update(obs["felt"])
         if obs["held"] is None:
-            self.states.append((State(stacks, tiles, lit=frozenset(map(tuple, obs["lit"]))), obs["lamp"]))
+            self.states.append((State(stacks, tiles, lit=frozenset(map(tuple, obs["lit"])), felt=self.felt), obs["lamp"]))
             self.visited.add(key_of(stacks))
         if self.pending and obs["last_effect"] == "no visible change":
             key, desc = self.pending
@@ -344,7 +360,10 @@ class LLMAgent:
                 self.queue = []
             if self.mode == "hypo" and self._plan(obs):
                 continue
-            self._ask(obs, legal)
+            try:
+                self._ask(obs, legal)
+            except AgentError:                      # no valid answer in 3 tries: keep exploring instead of giving up
+                self.explore = []
             if self.mode == "hypo" and self._plan(obs):
                 continue
             self.queue = list(self.explore) or self._fallback_actions(obs)
@@ -366,17 +385,14 @@ class LLMAgent:
         self._refresh()
         if not self.pool:
             return False
-        floor = obs["floor"]
-        tiles = {(r, c): v for r, row in enumerate(floor) for c, v in enumerate(row) if v}
-        stacks = stacks_of(obs)
-        spare = next(((r, c) for r in reversed(range(N)) for c in reversed(range(N)) if (r, c) not in tiles and (r, c) not in stacks))
-        found, dropped = search(self.pool, stacks, tiles, sorted(set(tiles) | set(stacks) | {spare}), self.visited)
+        tiles, stacks, cells = board(obs)
+        found, dropped = search(self.pool, stacks, tiles, cells, self.visited, felt=self.felt)
         self.discarded += [f"{h.desc} -- {why}" for h, why in dropped]
         if found is None:
             return False
         kind, path = found
         self.queue = [(a, None) for cube, cell in path for a in (pick(cube), place(cell))]
-        self.note = f"仮説 {self.n0}→{len(self.pool)} | {'検証' if kind == 'test' else '実行'}: {text_of(self.queue[0][0])}→{text_of(self.queue[1][0])}"
+        self.note = f"仮説 {self.n0}→{len(self.pool)} | {KIND_JA[kind]}: {text_of(self.queue[0][0])}→{text_of(self.queue[1][0])}"
         return True
 
     # ---- asking the LLM -----------------------------------------------------------------------
@@ -391,8 +407,30 @@ class LLMAgent:
             out += "\nSURVIVING HYPOTHESES (consistent with everything observed, but code found no experiment to separate them):\n" + \
                    ("\n".join(f"- {h.desc}\n{h.code}" for h in self.pool) or "(none)")
             out += "\nOBSERVED BOARD STATES (gripper empty; heights by cell | lit cells | lamp):\n" + self._state_table()
+            out += "\n" + self._regularities()
             out += "\nDISCARDED HYPOTHESES (contradicted by observation):\n" + ("\n".join(self.discarded[-4:]) or "(none)")
         return out
+
+    def _regularities(self):
+        """Generic quantities that matched the number of bordered cells in every observed state (no level-specific knowledge)."""
+        tiles = self.states[-1][0].tiles if self.states else {}
+        counts = {}
+        for v in tiles.values():
+            counts[v] = counts.get(v, 0) + 1
+        out = f"MARKED TILES BY DISPLAYED COLOUR (colour: how many): {counts}"
+        if len({len(st.lit or ()) for st, _ in self.states}) < 2:
+            return out
+        cells = sorted({c for st, _ in self.states for c in st.heights()} | set(map(tuple, tiles)))
+        feats = {f"height of cell {list(c)}": (lambda st, c=c: st.height(c)) for c in cells}
+        feats.update({
+            "number of cubes on marked tiles": lambda st: sum(st.height(c) for c in st.tiles),
+            "number of marked tiles holding a cube": lambda st: sum(st.height(c) > 0 for c in st.tiles),
+            "number of cubes on a tile of their own colour": lambda st: sum(st.tiles.get(c) == st.colour(i) for c in st.tiles for i in st.stack(c)),
+            "height of the tallest stack": lambda st: max(st.heights().values(), default=0),
+            "number of non-empty cells": lambda st: len(st.heights())})
+        hits = [name for name, f in feats.items() if all(f(st) == len(st.lit or ()) for st, _ in self.states)]
+        return out + "\nREGULARITIES (quantities equal to the number of bordered cells in every observed state; such a quantity is often what the rule is about): " + \
+            ("; ".join(hits) or "none found")
 
     def _state_table(self):
         rows, seen = [], set()
@@ -406,7 +444,7 @@ class LLMAgent:
     def _parse(self, d, obs, strict):
         """Validate one answer; returns (actions as [(action, expect)], error). `strict` (first try of a request):
         also bounce answers with no action or with hypotheses that are not code; later tries accept them."""
-        from .hypo import Hypothesis, falsify
+        from .hypo import Hypothesis, cells_in, ever_on, falsify
         if not isinstance(d.get("hypothesis"), str):
             return None, "missing 'hypothesis' string"
         raw = [d.get("action")] if self.mode == "plain" else (d.get("actions") or [d.get("action")])
@@ -439,7 +477,15 @@ class LLMAgent:
                     errs.append(f"hypothesis must be an object with 'description' and Python 'code' defining lit(state) ({type(e).__name__}: {e})")
                     continue
                 why = falsify(h, self.states)
-                (errs.append(f"'{h.desc}' contradicts an observation: {why}") if why else new.append(h))
+                if why:
+                    errs.append(f"'{h.desc}' contradicts an observation: {why}")
+                    continue
+                tiles, stacks, cells = board(obs)
+                if not obs["held"] and not ever_on(h, stacks, tiles, sorted(set(cells) | cells_in(h.code)), self.felt):
+                    errs.append(f"'{h.desc}' predicts the lamp OFF in every board state reachable within 6 moves, so it can be neither "
+                                "tested nor used to solve the level; replace it with a rule that says how the lamp can turn on")
+                    continue
+                new.append(h)
             if errs and strict:
                 return None, "; ".join(errs[:2])
             if not new and not self.pool:
@@ -487,6 +533,9 @@ class LLMAgent:
             messages += [{"role": "assistant", "content": text},
                          {"role": "user", "content": f"Invalid: {err}. Reply with corrected JSON only."}]
         raise AgentError("LLM could not produce a legal answer")
+
+
+KIND_JA = {"test": "検証", "plan": "実行", "weigh": "重さを測る"}
 
 
 class ReplayAgent:

@@ -6,12 +6,14 @@ show is decided by the rules in game.py. Fixed tile entities are moved with set_
 import numpy as np
 import genesis as gs
 
-from .game import CUBES
+from .game import CUBES, mass_of
 from .grid import ARC, CUBE, N, PITCH, X0, Y0, cell_center, rgb
 
-TILE = 0.058                    # tile edge; the frame below is PITCH wide
+TILE = 0.064                    # tile edge; wide enough that its colour shows around a cube
+FRAME = 0.075                   # white border of a lit tile (drawn under the tile)
 POOL = 6                        # coloured tile entities available per colour
 HIDDEN = -0.2                   # z where unused visual entities wait
+CAM_POS, CAM_LOOKAT, CAM_FOV = (0.92, -0.42, 0.62), (0.50, 0.03, 0.0), 45
 LAMP_XY = (X0 + PITCH * N / 2, Y0 + PITCH * N + 0.07)
 
 
@@ -21,6 +23,9 @@ def col(i):
 
 OPEN = 0.03           # finger opening (per finger): narrow, so neighbouring cells are not touched
 HAND_OFFSET = 0.105   # hand-link height above cube centre when grasping
+# no-slip pass and torsional friction: without them a heavy cube creeps off a light one and twists in the fingers
+RIGID = dict(noslip_iterations=10, enable_torsional_friction=True)
+GRIP = 20.0           # finger force [N]; firm enough that a heavy cube barely tilts in the hand
 QUAT_DOWN = np.array([0.0, 1.0, 0.0, 0.0])
 
 
@@ -31,6 +36,7 @@ class Sim:
             show_viewer=False,
             sim_options=gs.options.SimOptions(dt=0.01, substeps=2),
             vis_options=gs.options.VisOptions(show_world_frame=False),
+            rigid_options=gs.options.RigidOptions(**RIGID),
         )
         self.scene.add_entity(gs.morphs.Plane(), surface=gs.surfaces.Default(color=(0.02, 0.02, 0.02)))
         self.robot = self.scene.add_entity(
@@ -41,8 +47,8 @@ class Sim:
             self.ent[name] = self.scene.add_entity(
                 gs.morphs.Box(size=(CUBE,) * 3, pos=(0, 0, HIDDEN)),
                 material=gs.materials.Rigid(friction=2.0), surface=gs.surfaces.Default(color=col(colour)))
-        self.cam = self.scene.add_camera(res=res, pos=(1.0, -0.72, 0.85), lookat=(0.52, 0.0, 0.03),
-                                         fov=45, GUI=False)
+        self.cam = self.scene.add_camera(res=res, pos=CAM_POS, lookat=CAM_LOOKAT,
+                                         fov=CAM_FOV, GUI=False)
         self.scene.build()
         self.hand = self.robot.get_link("hand")
         self.arm = np.arange(7)
@@ -73,7 +79,7 @@ class Sim:
         for r in range(N):
             for c in range(N):
                 x, y = cell_center((r, c))
-                self.frame[(r, c)] = self._visual(gs.morphs.Box, (1, 1, 1), size=(PITCH - 0.002,) * 2 + (0.003,),
+                self.frame[(r, c)] = self._visual(gs.morphs.Box, (1, 1, 1), size=(FRAME,) * 2 + (0.003,),
                                                   pos=(x, y, HIDDEN))
                 self._visual(gs.morphs.Box, col(0), size=(TILE, TILE, 0.004), pos=(x, y, 0.002))
         for colour, lst in self.pool.items():
@@ -107,9 +113,11 @@ class Sim:
         self.bulb[not fb.lamp].set_pos(np.array([lx, ly, HIDDEN]))
 
     def load_level(self, level, fb):
-        """Put the cubes of `level` on their start cells (all cubes exist in every level) and show `fb`."""
+        """Put the cubes of `level` on their start cells (all cubes exist in every level) and show `fb`.
+        Cube masses are set here; they never leave the physics (the agent can only feel them)."""
         self.show(fb)
         for name, cell in level.start.items():
+            self.ent[name].set_mass(mass_of(level, name))
             x, y = cell_center(cell)
             self.ent[name].set_pos(np.array([x, y, CUBE / 2]))
             self.ent[name].set_quat(np.array([1.0, 0, 0, 0]))
@@ -158,7 +166,7 @@ class Sim:
             self.robot.control_dofs_position(q, self.fingers)
             self.step()
 
-    def close_gripper(self, steps=40, force=8.0):
+    def close_gripper(self, steps=40, force=GRIP):
         self.robot.control_dofs_force(np.array([-force, -force]), self.fingers)
         self.hold(steps)
 
@@ -172,12 +180,25 @@ class Sim:
 
     # ---- primitives -----------------------------------------------------
     def pick(self, name, clear_z=0.30):
+        """Grasp and lift. Keeps what weighing needs: the arm state and cube pose before the pick, and the
+        joint torques while the lifted cube is held still (`self.felt`)."""
         p = self.pos(name)
+        self.before = (self.robot.get_qpos().cpu().numpy(), p, self.ent[name].get_quat().cpu().numpy())
         self.open_gripper()
         self.move_to((p[0], p[1], clear_z))
         self.move_to((p[0], p[1], p[2] + HAND_OFFSET), steps=80)
         self.close_gripper()
         self.move_to((p[0], p[1], clear_z), steps=100)
+        self.felt = self.held_torques()
+
+    def held_torques(self, steps=25, avg=10):
+        """Joint torques of the arm holding still, averaged over the last `avg` steps."""
+        taus = []
+        for i in range(steps):
+            self.step()
+            if i >= steps - avg:
+                taus.append(self.robot.get_dofs_control_force().cpu().numpy()[:7])
+        return np.mean(taus, axis=0)
 
     def place_at(self, held, xy, support_top, clear_z=0.30):
         """Lower the held cube so that its bottom touches `support_top`, release, retreat.

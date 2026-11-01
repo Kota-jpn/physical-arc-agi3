@@ -3,17 +3,20 @@
 The LLM writes competing hypotheses as tiny Python functions `lit(state) -> bool` ("is the lamp ON in this
 board state?"). Plain code then (1) falsifies them against every state observed so far and (2) picks the next
 experiment: the reachable board state on which the surviving hypotheses disagree most, or, if they all agree
-that some reachable state lights the lamp, the shortest way there.
+that some reachable state lights the lamp, the shortest way there. Hypotheses may also use the cube weights the
+arm has felt (state.mass); when an answer hinges on a cube not weighed yet, lifting that cube is the experiment.
 
 BOUNDARY (no cheating): the game rules (game.feedback) are never called here. `apply_move` is only a
 transition simulator for where cubes end up physically (a pick+place); whether the lamp is ON in a state we
 have not visited is known only through the hypotheses, never through the true rules.
 """
 import builtins
+import re
 import signal
 from contextlib import contextmanager
 
 from .game import CUBES, MAX_H
+from .grid import N
 
 SAFE = {n: getattr(builtins, n) for n in
         "len range all any sum min max abs sorted set frozenset dict list tuple enumerate zip isinstance int bool "
@@ -36,6 +39,30 @@ class Stack(list):
     __hash__ = None
 
 
+class Kg(float):
+    """A felt weight. Measurements are noisy and 0.1 + 0.2 != 0.3 in floats, so == means "within the resolution"."""
+    RES = 0.015
+
+    def __eq__(self, other):
+        return abs(self - other) <= Kg.RES if isinstance(other, (int, float)) else False
+
+    def __ne__(self, other):
+        return not self == other
+
+    __hash__ = float.__hash__
+
+    def __add__(self, other):
+        return Kg(float(self) + other)
+
+    __radd__ = __add__
+
+    def __sub__(self, other):
+        return Kg(float(self) - other)
+
+    def __rsub__(self, other):
+        return Kg(other - float(self))
+
+
 class Tiles(dict):
     """{(row, col): colour}; lookups also accept a list [row, col] or None (not a tile)."""
     def _k(self, key):
@@ -51,11 +78,16 @@ class Tiles(dict):
         return super().__contains__(self._k(key))
 
 
+class Unweighed(Exception):
+    """A hypothesis asked for the mass of a cube the arm has not lifted yet."""
+
+
 class State:
     """Read-only board state handed to hypothesis programs (see the prompt for the documented API)."""
 
-    def __init__(self, stacks, tiles, lit=None):
+    def __init__(self, stacks, tiles, lit=None, felt=None):
         self._stacks, self.tiles, self.lit = stacks, Tiles(tiles), lit
+        self._felt = {} if felt is None else felt       # shared dict: masses are constant, so later weighings count too
         self.cubes = sorted(CUBES)
 
     def stack(self, cell):
@@ -78,6 +110,11 @@ class State:
 
     def colour(self, cube):
         return CUBES[cube]
+
+    def mass(self, cube):
+        if cube not in self._felt:
+            raise Unweighed(cube)
+        return Kg(self._felt[cube])
 
 
 class Timeout(Exception):
@@ -117,7 +154,11 @@ def falsify(h, history):
     try:
         with limit(2):
             for state, lamp in history:
-                if bool(h.fn(state)) != lamp:
+                try:
+                    pred = bool(h.fn(state))
+                except Unweighed:                       # cannot be checked until that cube is weighed
+                    continue
+                if pred != lamp:
                     return (f"predicted lamp {'ON' if not lamp else 'OFF'} but it was {'ON' if lamp else 'OFF'} with cubes {key_of(state._stacks)}"
                             + (" (check for conditions that are vacuously true, e.g. all() over an empty list)" if not lamp else ""))
     except Timeout:
@@ -138,12 +179,15 @@ def apply_move(stacks, cube, cell):
     return {c: s for c, s in new.items() if s}
 
 
-def search(hyps, stacks, tiles, cells, visited, max_depth=3):
+def search(hyps, stacks, tiles, cells, visited, max_depth=6, felt=None):
     """Breadth-first over pick+place moves. Returns (kind, [(cube, cell), ...]) or None, plus discarded hyps.
 
     kind 'plan': every surviving hypothesis that answers predicts the lamp ON in the final state.
-    kind 'test': the surviving hypotheses disagree on the final state (largest split wins)."""
+    kind 'test': the surviving hypotheses disagree on the final state (largest split wins).
+    kind 'weigh': no test or plan is decidable with the weights known so far; lift the cube whose unknown
+    weight the hypotheses asked about most, onto the cell where most of them could not answer."""
     seen, frontier, dropped = set(visited) | {key_of(stacks)}, [(stacks, [])], []
+    asked = {}                                          # (cube, first move) -> hypotheses that needed its weight
     for _ in range(max_depth):
         new = []
         for st, path in frontier:
@@ -158,14 +202,16 @@ def search(hyps, stacks, tiles, cells, visited, max_depth=3):
         for h in list(hyps):
             try:
                 with limit(3):
-                    preds.append([_pred(h, st, tiles) for st, _ in new])
+                    preds.append([_pred(h, st, tiles, felt, asked, path[0]) for st, path in new])
             except Timeout:
                 dropped.append((h, "timed out"))
                 hyps.remove(h)
         best, best_score = None, (0, 0)
         for i, (st, path) in enumerate(new):
             votes = [p[i] for p in preds if p[i] is not None]
-            if votes and all(votes):
+            unsure = any(p[i] is UNWEIGHED for p in preds)
+            votes = [v for v in votes if v is not UNWEIGHED]
+            if votes and all(votes) and not unsure:
                 return ("plan", path), dropped
             score = (min(votes.count(True), votes.count(False)), votes.count(True))   # larger split, then more 'ON' votes
             if score[0] > 0 and score > best_score:
@@ -173,14 +219,56 @@ def search(hyps, stacks, tiles, cells, visited, max_depth=3):
         if best:
             return ("test", best), dropped
         frontier = new
+    if asked:
+        cube = max(CUBES, key=lambda c: sum(n for (k, _), n in asked.items() if k == c))
+        move = max((m for k, m in asked if k == cube), key=lambda m: asked[(cube, m)])
+        return ("weigh", [move]), dropped
     return None, dropped
 
 
-def _pred(h, stacks, tiles):
-    """Prediction on a hypothetical state; None if the program cannot answer (e.g. it reads state.lit)."""
+UNWEIGHED = "unweighed"     # prediction marker: the answer depends on a weight not known yet
+
+
+def cells_in(code):
+    """Board cells written as literals in a hypothesis, e.g. (2, 1) or [2, 1]."""
+    return {(int(r), int(c)) for r, c in re.findall(r"[\(\[]\s*(\d)\s*,\s*(\d)\s*[\)\]]", code) if int(r) < N and int(c) < N}
+
+
+def ever_on(h, stacks, tiles, cells, felt=None, max_depth=6):
+    """False if `h` predicts the lamp OFF in every state reachable within `max_depth` moves: such a hypothesis
+    can be neither tested nor used to solve the level. True if some state may light it (or it cannot tell)."""
+    seen, frontier = {key_of(stacks)}, [stacks]
     try:
-        return bool(h.fn(State(stacks, tiles, lit=None)))
+        with limit(3):
+            for _ in range(max_depth):
+                new = []
+                for st in frontier:
+                    for cube in CUBES:
+                        for cell in cells:
+                            nxt = apply_move(st, cube, cell)
+                            if nxt is None or key_of(nxt) in seen:
+                                continue
+                            seen.add(key_of(nxt))
+                            if _pred(h, nxt, tiles, felt) in (True, UNWEIGHED):
+                                return True
+                            new.append(nxt)
+                frontier = new
+    except Timeout:
+        return True
+    return False
+
+
+def _pred(h, stacks, tiles, felt=None, asked=None, first=None):
+    """Prediction on a hypothetical state; None if the program cannot answer (e.g. it reads state.lit),
+    UNWEIGHED if it needs the weight of a cube not lifted yet (counted in `asked` per first move)."""
+    try:
+        return bool(h.fn(State(stacks, tiles, lit=None, felt=felt)))
     except Timeout:
         raise
+    except Unweighed as e:
+        cube = e.args[0]
+        if asked is not None and cube in CUBES and first is not None and first[0] == cube:
+            asked[(cube, first)] = asked.get((cube, first), 0) + 1
+        return UNWEIGHED
     except Exception:
         return None

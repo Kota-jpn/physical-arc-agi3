@@ -1,0 +1,22 @@
+{
+ "nominal": {
+  "mean_abs_error_kg": 0.001,
+  "max_abs_error_kg": 0.002
+ },
+ "torque noise 0.05 Nm": {
+  "mean_abs_error_kg": 0.004,
+  "max_abs_error_kg": 0.007
+ },
+ "torque noise 0.2 Nm": {
+  "mean_abs_error_kg": 0.016,
+  "max_abs_error_kg": 0.031
+ },
+ "grip 12 N (model 20 N)": {
+  "mean_abs_error_kg": 0.001,
+  "max_abs_error_kg": 0.003
+ },
+ "+0.1 kg on the hand": {
+  "mean_abs_error_kg": 0.096,
+  "max_abs_error_kg": 0.097
+ }
+}

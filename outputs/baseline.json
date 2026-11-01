@@ -24,6 +24,14 @@
     "mean_actions_to_solve": 110,
     "mean_actions_unsolved_as_cap": 199.6,
     "mean_llm_requests": 0
+   },
+   "4": {
+    "optimal": 6,
+    "solve_rate": 0.0,
+    "mean_actions_to_solve": null,
+    "mean_actions_unsolved_as_cap": 200,
+    "mean_llm_requests": 0,
+    "episodes": 200
    }
   }
  },
@@ -52,36 +60,56 @@
     "mean_actions_to_solve": 6,
     "mean_actions_unsolved_as_cap": 6,
     "mean_llm_requests": 0
+   },
+   "4": {
+    "optimal": 6,
+    "solve_rate": 0.0,
+    "mean_actions_to_solve": null,
+    "mean_actions_unsolved_as_cap": 200,
+    "mean_llm_requests": 0,
+    "episodes": 200
    }
   }
  },
  "llm-hypo": {
   "label": "gemini-3.1-flash-lite [llm-hypo]",
-  "episodes": 3,
-  "cap": 40,
+  "episodes": 9,
+  "cap": 30,
   "levels": {
    "1": {
     "optimal": 6,
     "solve_rate": 1.0,
-    "mean_actions_to_solve": 6,
-    "mean_actions_unsolved_as_cap": 6,
-    "mean_llm_requests": 1.7
+    "mean_actions_to_solve": 8.9,
+    "mean_actions_unsolved_as_cap": 8.9,
+    "mean_llm_requests": 2.7,
+    "episodes": 9
    },
    "2": {
     "optimal": 6,
-    "solve_rate": 0.6666666666666666,
-    "mean_actions_to_solve": 29,
-    "mean_actions_unsolved_as_cap": 32.7,
-    "mean_llm_requests": 18.7
+    "solve_rate": 0.3333,
+    "mean_actions_to_solve": 14.0,
+    "mean_actions_unsolved_as_cap": 24.7,
+    "mean_llm_requests": 13.4,
+    "episodes": 9
    },
    "3": {
     "optimal": 6,
-    "solve_rate": 0.0,
-    "mean_actions_to_solve": null,
-    "mean_actions_unsolved_as_cap": 40,
-    "mean_llm_requests": 27.3
+    "solve_rate": 0.1111,
+    "mean_actions_to_solve": 20.0,
+    "mean_actions_unsolved_as_cap": 28.9,
+    "mean_llm_requests": 16.6,
+    "episodes": 9
+   },
+   "4": {
+    "optimal": 6,
+    "solve_rate": 0.5556,
+    "mean_actions_to_solve": 22.6,
+    "mean_actions_unsolved_as_cap": 25.9,
+    "mean_llm_requests": 10.0,
+    "episodes": 9
    }
-  }
+  },
+  "note": "merged: 2026-10-28 run (4 episodes, stopped by the daily quota) + 2026-10-29 run (5 episodes), same code after the hypo.Kg fix"
  },
  "llm-tricks": {
   "label": "gemini-3.1-flash-lite [llm-tricks]",
@@ -136,7 +164,85 @@
     "mean_actions_to_solve": 20,
     "mean_actions_unsolved_as_cap": 30,
     "mean_llm_requests": 43.5
+   },
+   "4": {
+    "optimal": 4,
+    "solve_rate": 1.0,
+    "mean_actions_to_solve": 7.6,
+    "mean_actions_unsolved_as_cap": 7.6,
+    "mean_llm_requests": 9.2,
+    "episodes": 5
    }
   }
+ },
+ "llm-hypo-noweight": {
+  "label": "gemini-3.1-flash-lite [llm-hypo]",
+  "episodes": 5,
+  "cap": 30,
+  "levels": {
+   "4": {
+    "optimal": 6,
+    "solve_rate": 0.0,
+    "mean_actions_to_solve": null,
+    "mean_actions_unsolved_as_cap": 30,
+    "mean_llm_requests": 11.2,
+    "episodes": 5
+   }
+  }
+ },
+ "llm-plain-noweight": {
+  "label": "gemini-3.1-flash-lite [llm-plain]",
+  "episodes": 5,
+  "cap": 30,
+  "levels": {
+   "4": {
+    "optimal": 4,
+    "solve_rate": 1.0,
+    "mean_actions_to_solve": 7.6,
+    "mean_actions_unsolved_as_cap": 7.6,
+    "mean_llm_requests": 10,
+    "episodes": 5
+   }
+  }
+ },
+ "llm-hypo-regularities": {
+  "label": "gemini-3.1-flash-lite [llm-hypo]",
+  "episodes": 5,
+  "cap": 30,
+  "levels": {
+   "1": {
+    "optimal": 6,
+    "solve_rate": 0.8,
+    "mean_actions_to_solve": 8,
+    "mean_actions_unsolved_as_cap": 12.4,
+    "mean_llm_requests": 6.8,
+    "episodes": 5
+   },
+   "2": {
+    "optimal": 6,
+    "solve_rate": 0.4,
+    "mean_actions_to_solve": 18,
+    "mean_actions_unsolved_as_cap": 25.2,
+    "mean_llm_requests": 20.6,
+    "episodes": 5
+   },
+   "3": {
+    "optimal": 6,
+    "solve_rate": 0.6,
+    "mean_actions_to_solve": 18,
+    "mean_actions_unsolved_as_cap": 22.8,
+    "mean_llm_requests": 11.2,
+    "episodes": 5
+   },
+   "4": {
+    "optimal": 6,
+    "solve_rate": 0.8,
+    "mean_actions_to_solve": 23.2,
+    "mean_actions_unsolved_as_cap": 24.6,
+    "mean_llm_requests": 9.8,
+    "episodes": 5
+   }
+  },
+  "note": "2026-11-01: with the REGULARITIES hint (agents._regularities)"
  }
 }
