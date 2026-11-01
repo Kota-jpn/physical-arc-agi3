@@ -1,7 +1,7 @@
 ---
 title: "Physical ARC-AGI-3: ルールを教えられないロボットが、試して解く"
 author: "Physical AI 講座 2026 応用編1 最終課題 / Kakinotane"
-date: "動画: <https://youtu.be/QahnngaosJg> ／ コード: <https://github.com/Kota-jpn/physical-arc-agi3>"
+date: "動画: <https://youtu.be/dkV9Kua8L0g> ／ コード: <https://github.com/Kota-jpn/physical-arc-agi3>"
 ---
 
 > 非公式の個人作品です。ARC Prize Foundation の ARC-AGI-3 に着想を得ていますが、同財団とは関係がなく、公式のゲームやデータも使っていません。
